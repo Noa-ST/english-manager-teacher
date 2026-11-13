@@ -1,0 +1,424 @@
+// =============================================================================
+//  Class Management & Teacher Portal — Prisma schema
+//  Prisma ORM 7 · PostgreSQL
+//
+//  - Connection URL lives in /prisma.config.ts (Prisma 7 no longer reads `url` here).
+//  - Client is generated into src/generated/prisma (git-ignored, rebuilt on install).
+//  - Runtime connects through the `@prisma/adapter-pg` driver adapter
+//    (see src/lib/db/prisma.ts).
+//
+//  ⚠️ ACCESS RULE: Only `src/services/**` (and `src/lib/db/**`) may import the
+//     generated client. Enforced by ESLint `no-restricted-imports`.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// -----------------------------------------------------------------------------
+//  ENUMS
+// -----------------------------------------------------------------------------
+
+enum AnnouncementCategory {
+  urgent
+  schedule
+  tuition
+  homework
+  event
+}
+
+enum ContentStatus {
+  published
+  draft
+}
+
+enum SessionStatus {
+  upcoming
+  ongoing
+  completed
+}
+
+enum AttendanceStatus {
+  present
+  late
+  absent
+  excused
+}
+
+enum HonorPeriod {
+  week
+  month
+  course
+}
+
+enum PodcastCategory {
+  weekly_digest
+  ielts_listening
+  pronunciation
+  parent_corner
+}
+
+enum FileVisibility {
+  public
+  private
+}
+
+enum ResourceFileType {
+  PDF
+  SLIDE
+  AUDIO
+  WORKSHEET
+  IMAGE
+}
+
+enum StorageProviderType {
+  cloudinary
+  supabase
+  r2
+  s3
+  local
+}
+
+enum TuitionStatus {
+  paid
+  due_soon
+  overdue
+}
+
+enum StudentStatus {
+  active
+  trial
+  on_leave
+}
+
+enum UserRole {
+  admin
+  student
+}
+
+// -----------------------------------------------------------------------------
+//  0. AUTH PROFILES & TWO-ROLE RBAC (SUPABASE AUTH LINKED)
+// -----------------------------------------------------------------------------
+
+model Profile {
+  id        String   @id @db.Uuid
+  email     String   @unique
+  fullName  String   @map("full_name")
+  avatarUrl String?  @map("avatar_url")
+  role      UserRole @default(student)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  student   Student?
+
+  @@index([role, isActive])
+  @@map("profiles")
+}
+
+// -----------------------------------------------------------------------------
+//  1. TEACHER BRAND & SYSTEM SETTINGS
+// -----------------------------------------------------------------------------
+
+model TeacherSetting {
+  id                     String   @id @default("default")
+  name                   String
+  title                  String
+  credentials            String[]
+  slogan                 String
+  shortBio               String
+  philosophy             String
+  experienceYears        Int      @default(9)
+  totalStudents          Int      @default(420)
+  bandAchievementRate    String
+  email                  String
+  officeHours            String
+  location               String
+  currentTerm            String   @default("Học kỳ I · Năm học 2026–2027")
+  defaultPortalPin       String   @default("123456")
+  autoNotifyParents      Boolean  @default(true)
+  presignedExpirySeconds Int      @default(900)
+  updatedAt              DateTime @updatedAt
+}
+
+// -----------------------------------------------------------------------------
+//  2. CLASSROOMS, SCHEDULE & ATTENDANCE
+// -----------------------------------------------------------------------------
+
+model Classroom {
+  id              String         @id @default(cuid())
+  code            String         @unique
+  name            String
+  level           String
+  targetBand      String
+  scheduleSummary String
+  room            String
+  enrolled        Int            @default(0)
+  capacity        Int            @default(15)
+  attendanceRate  Float          @default(100)
+  averageScore    Float          @default(7.0)
+  currentModule   String
+  status          String         @default("active")
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  students        Student[]
+  sessions        ClassSession[]
+}
+
+model ClassSession {
+  id            String             @id @default(cuid())
+  classroomId   String?
+  classroom     Classroom?         @relation(fields: [classroomId], references: [id], onDelete: SetNull)
+  classCode     String
+  className     String
+  level         String
+  dayOfWeek     Int
+  dayLabel      String
+  startTime     String
+  endTime       String
+  room          String
+  topic         String
+  enrolledCount Int                @default(12)
+  capacity      Int                @default(15)
+  status        SessionStatus      @default(upcoming)
+  hasConflict   Boolean            @default(false)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  attendances   AttendanceRecord[]
+
+  @@index([dayOfWeek, startTime])
+}
+
+// -----------------------------------------------------------------------------
+//  3. STUDENTS, GRADES & ATTENDANCE RECORDS
+// -----------------------------------------------------------------------------
+
+model Student {
+  id                  String             @id @default(cuid())
+  code                String             @unique
+  profileId           String?            @unique @map("profile_id") @db.Uuid
+  profile             Profile?           @relation(fields: [profileId], references: [id], onDelete: SetNull)
+  fullName            String
+  accessPinHash       String             @default("")
+  classroomId         String
+  classroom           Classroom          @relation(fields: [classroomId], references: [id], onDelete: Restrict)
+  className           String
+  level               String
+  joinedAt            String
+  attendanceRate      Float              @default(100)
+  averageScore        Float              @default(7.0)
+  targetGoal          String
+  tuitionStatus       TuitionStatus      @default(paid)
+  tuitionPeriod       String
+  tuitionAmount       String
+  parentRelation      String
+  parentContactMasked String
+  status              StudentStatus      @default(active)
+  recentComment       String
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  grades              GradeRecord[]
+  attendanceHistory   AttendanceRecord[]
+
+  @@index([classroomId])
+  @@index([tuitionStatus])
+  @@index([profileId])
+}
+
+model GradeRecord {
+  id              String   @id @default(cuid())
+  studentId       String
+  student         Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  assessmentTitle String
+  date            String
+  listening       Float
+  reading         Float
+  writing         Float
+  speaking        Float
+  overall         Float
+  comment         String
+  createdAt       DateTime @default(now())
+
+  @@index([studentId])
+  @@index([assessmentTitle])
+}
+
+model AttendanceRecord {
+  id          String           @id @default(cuid())
+  studentId   String
+  student     Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  sessionId   String?
+  session     ClassSession?    @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  date        String
+  sessionName String
+  status      AttendanceStatus @default(present)
+  note        String?
+  createdAt   DateTime         @default(now())
+
+  @@index([studentId, date])
+}
+
+// -----------------------------------------------------------------------------
+//  4. CMS: ANNOUNCEMENTS, PODCASTS, HALL OF FAME, STUDENT PROJECTS
+// -----------------------------------------------------------------------------
+
+model Announcement {
+  id            String                   @id @default(cuid())
+  title         String
+  excerpt       String
+  content       String[]
+  category      AnnouncementCategory     @default(event)
+  categoryLabel String
+  isUrgent      Boolean                  @default(false)
+  isPinned      Boolean                  @default(false)
+  publishedAt   String
+  readTime      String                   @default("2 phút đọc")
+  targetClasses String[]
+  status        ContentStatus            @default(published)
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+  attachments   AnnouncementAttachment[]
+}
+
+model AnnouncementAttachment {
+  id             String       @id @default(cuid())
+  announcementId String
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  name           String
+  size           String
+  type           String       @default("PDF")
+  objectKey      String?
+  downloadCount  Int          @default(0)
+}
+
+model PodcastEpisode {
+  id                   String          @id @default(cuid())
+  episodeNumber        Int
+  title                String
+  summary              String
+  showNotes            String[]
+  category             PodcastCategory @default(weekly_digest)
+  categoryLabel        String
+  audioKey             String?
+  thumbnailKey         String?
+  durationSeconds      Int             @default(720)
+  durationLabel        String
+  publishedAt          String
+  isFeatured           Boolean         @default(false)
+  coverTheme           String          @default("navy")
+  vocabularyHighlights Json
+  status               ContentStatus   @default(published)
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+}
+
+model HallOfFameEntry {
+  id                 String      @id @default(cuid())
+  displayName        String
+  avatarInitials     String
+  className          String
+  rank               Int         @default(1)
+  period             HonorPeriod @default(month)
+  periodLabel        String
+  headlineMetric     String
+  badgeTitle         String
+  teacherEndorsement String
+  milestones         String[]
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  @@index([period, rank])
+}
+
+model StudentProject {
+  id             String        @id @default(cuid())
+  title          String
+  studentOrTeam  String
+  className      String
+  category       String
+  summary        String
+  keyTakeaway    String
+  publishedAt    String
+  externalUrl    String
+  featuredMetric String
+  accentTheme    String        @default("navy")
+  status         ContentStatus @default(published)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+}
+
+// -----------------------------------------------------------------------------
+//  5. CLOUD RESOURCE LIBRARY & MULTI-PROVIDER STORAGE (CLOUDINARY + SUPABASE)
+// -----------------------------------------------------------------------------
+
+model ResourceFolder {
+  id          String         @id @default(cuid())
+  name        String
+  description String
+  parentId    String?
+  itemCount   Int            @default(0)
+  updatedAt   String
+  visibility  FileVisibility @default(public)
+  files       ResourceFile[]
+}
+
+model ResourceFile {
+  id                 String              @id @default(cuid())
+  folderId           String
+  folder             ResourceFolder      @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  folderName         String
+  title              String
+  description        String
+  fileType           ResourceFileType    @default(PDF)
+  provider           StorageProviderType @default(supabase)
+  mimeType           String              @default("application/pdf")
+  bucketName         String?
+  storagePath        String?
+  cloudinaryPublicId String?
+  publicUrl          String?
+  objectKey          String?
+  size               String
+  sizeBytes          Int                 @default(0)
+  updatedAt          String
+  downloads          Int                 @default(0)
+  pagesOrDuration    String
+  level              String
+  visibility         FileVisibility      @default(public)
+  category           String              @default("general")
+  ownerId            String?
+  previewSummary     String[]
+  deletedAt          DateTime?
+
+  @@index([folderId, visibility])
+  @@index([provider, fileType])
+}
+
+model StoredFile {
+  id                 String              @id @default(cuid())
+  originalName       String              @map("original_name")
+  storedName         String              @map("stored_name")
+  provider           StorageProviderType
+  fileType           String              @map("file_type")
+  mimeType           String              @map("mime_type")
+  fileSize           Int                 @map("file_size")
+  bucketName         String?             @map("bucket_name")
+  storagePath        String?             @map("storage_path")
+  cloudinaryPublicId String?             @map("cloudinary_public_id")
+  publicUrl          String?             @map("public_url")
+  isPublic           Boolean             @default(true) @map("is_public")
+  ownerId            String?             @map("owner_id")
+  category           String              @default("general")
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+  deletedAt          DateTime?           @map("deleted_at")
+
+  @@index([provider, category])
+  @@index([isPublic, deletedAt])
+  @@index([cloudinaryPublicId])
+  @@index([bucketName, storagePath])
+  @@map("stored_files")
+}

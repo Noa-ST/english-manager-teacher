@@ -1,6 +1,12 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# dependencies
+
+
+# =============================================================================
+#  English Manager — Git Ignore Configuration
+#  Covers Next.js 16, TypeScript, Turbopack, Prisma, Supabase, OS & Editors
+# =============================================================================
+
+# --- 1. Dependencies & Package Managers --------------------------------------
 /node_modules
 /.pnp
 .pnp.*
@@ -10,32 +16,92 @@
 !.yarn/releases
 !.yarn/versions
 
-# testing
-/coverage
+# --- 2. Environment Variables & Credentials (CRITICAL SECURITY) -------------
+# Ignore all real environment files with secrets, but KEEP .env.example
+.env
+.env.*
+.env*.local
+!.env.example
 
-# next.js
+# Private keys, certificates & credentials
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+id_rsa
+id_ed25519
+
+# --- 3. Build & Output Artifacts ----------------------------------------------
 /.next/
 /out/
+/build/
+/dist/
+*.tsbuildinfo
+next-env.d.ts
 
-# production
-/build
+# Turbopack cache
+.turbo/
 
-# misc
-.DS_Store
-*.pem
+# Vercel deployment cache
+.vercel
 
-# debug
+# --- 4. Testing & Code Quality ------------------------------------------------
+/coverage
+/.nyc_output/
+/test-results/
+
+# --- 5. Logs & Debugging ------------------------------------------------------
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 .pnpm-debug.log*
+logs/
 
-# env files (can opt-in for committing if needed)
-.env*
+# --- 6. Database & Local Storage Files ----------------------------------------
+# SQLite / local embedded DBs
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.db
+*.db-journal
 
-# vercel
-.vercel
+# Generated Prisma Client (rebuilt automatically via `npx prisma generate`)
+/src/generated/prisma/
 
-# typescript
-*.tsbuildinfo
-next-env.d.ts
+# --- 7. Operating System Metadata --------------------------------------------
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# local runtime data
+/.data/
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# --- 8. IDEs & Editors -------------------------------------------------------
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# VS Code — ignore workspace user state, keep team recommendations if added
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
