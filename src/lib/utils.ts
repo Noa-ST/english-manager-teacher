@@ -44,3 +44,18 @@ export function formatDuration(totalSeconds: number): string {
   const mmss = `${String(m).padStart(h ? 2 : 1, "0")}:${String(s).padStart(2, "0")}`;
   return h ? `${h}:${mmss}` : mmss;
 }
+
+/**
+ * Chuyển đổi chuỗi tiếng Việt có dấu thành không dấu (lowercase, chuẩn hóa Unicode NFD).
+ * Dùng cho tìm kiếm không phân biệt dấu và chữ hoa/thường.
+ * Ví dụ: "Trần Bảo Ngọc" -> "tran bao ngoc"
+ */
+export function removeVietnameseTones(str: string): string {
+  if (!str) return "";
+  return str
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[đĐ]/g, "d")
+    .toLowerCase()
+    .trim();
+}

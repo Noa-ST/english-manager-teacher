@@ -12,6 +12,7 @@ import {
   CLASSROOMS_DATA,
 } from "@/services/classroom-data";
 import { apiRequest } from "@/lib/api-client";
+import { removeVietnameseTones } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ModalDialog } from "@/components/ui/dialog";
@@ -78,11 +79,13 @@ export default function AdminGradesPage() {
     return rows.filter((row) => {
       const matchesClass =
         selectedClassId === "all" || row.classId === selectedClassId;
-      const q = searchQuery.trim().toLowerCase();
+      const q = searchQuery.trim();
+      if (!q) return matchesClass;
+
+      const normQ = removeVietnameseTones(q);
       const matchesSearch =
-        !q ||
-        row.fullName.toLowerCase().includes(q) ||
-        row.code.toLowerCase().includes(q);
+        removeVietnameseTones(row.fullName).includes(normQ) ||
+        removeVietnameseTones(row.code).includes(normQ);
       return matchesClass && matchesSearch;
     });
   }, [rows, selectedClassId, searchQuery]);

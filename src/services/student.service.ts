@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { removeVietnameseTones } from "@/lib/utils";
 import type { Paginated } from "@/types";
 
 import type { AdminStudentRecord } from "./classroom-data";
@@ -19,13 +20,13 @@ export const createStudentSchema = z.object({
   code: z.string().trim().min(1).max(32),
   fullName: z.string().trim().min(1).max(120),
   classId: z.string().trim().min(1).default("cls-ii-01"),
-  targetGoal: z.string().trim().max(120).default("IELTS 7.0 Overall"),
-  tuitionStatus: z.enum(["paid", "due-soon", "overdue"]).default("paid"),
+  targetGoal: z.string().trim().max(120).default("Đạt mục tiêu khóa học"),
+  tuitionStatus: z.enum(["paid", "due-soon", "overdue"]).default("due-soon"),
   recentComment: z
     .string()
     .trim()
     .max(2000)
-    .default("Tinh thần học tập chủ động, hoàn thành bài tập đúng hạn."),
+    .default(""),
   parentName: z.string().trim().max(120).optional(),
   parentPhone: z.string().trim().max(20).optional(),
   parentEmail: z.email().optional(),
@@ -39,6 +40,7 @@ export const listStudentsSchema = paginationSchema.extend({
   search: z.string().trim().max(120).optional(),
   classId: z.string().trim().max(64).optional(),
   tuitionStatus: z.enum(["all", "paid", "due-soon", "overdue"]).optional(),
+  status: z.enum(["all", "active", "archived"]).default("active"),
   sortBy: z.enum(["score", "attendance", "name"]).default("score"),
 });
 export type ListStudentsInput = z.input<typeof listStudentsSchema>;
@@ -87,13 +89,20 @@ export async function listStudents(
       !query.tuitionStatus ||
       query.tuitionStatus === "all" ||
       stu.tuitionStatus === query.tuitionStatus;
-    const q = query.search?.toLowerCase() ?? "";
+    const matchesStatus =
+      query.status === "all"
+        ? true
+        : query.status === "archived"
+          ? stu.status === "archived"
+          : stu.status !== "archived";
+    const q = query.search?.trim() ?? "";
+    const normQ = removeVietnameseTones(q);
     const matchesSearch =
-      !q ||
-      stu.fullName.toLowerCase().includes(q) ||
-      stu.code.toLowerCase().includes(q) ||
-      stu.className.toLowerCase().includes(q);
-    return matchesClass && matchesTuition && matchesSearch;
+      !normQ ||
+      removeVietnameseTones(stu.fullName).includes(normQ) ||
+      removeVietnameseTones(stu.code).includes(normQ) ||
+      removeVietnameseTones(stu.className).includes(normQ);
+    return matchesClass && matchesTuition && matchesStatus && matchesSearch;
   });
 
   const sorted = [...filtered].sort((a, b) => {
@@ -174,8 +183,8 @@ export async function createStudent(input: unknown): Promise<AdminStudentRecord>
     className: targetClass?.name ?? "IELTS Intensive (Band 6.5–7.5+)",
     level: targetClass?.level ?? "CEFR B2",
     joinedAt: today,
-    attendanceRate: 100,
-    averageScore: 7.0,
+    attendanceRate: 0,
+    averageScore: 0,
     targetGoal: data.targetGoal,
     tuitionStatus: data.tuitionStatus,
     tuitionPeriod: "Học kỳ II (Tháng 11 – 01)",
@@ -185,27 +194,9 @@ export async function createStudent(input: unknown): Promise<AdminStudentRecord>
       : "Phụ huynh học sinh",
     parentContactMasked: data.parentPhone ?? "0909 ••• 888",
     status: "active",
-    recentComment: data.recentComment,
-    grades: [
-      {
-        id: `gr-${Date.now()}`,
-        assessmentTitle: "Placement Assessment — Đánh giá đầu vào",
-        date: today,
-        listening: 7.0,
-        reading: 7.0,
-        writing: 6.5,
-        speaking: 7.0,
-        overall: 7.0,
-        comment: data.recentComment,
-      },
-    ],
-    attendanceHistory: [
-      {
-        date: today,
-        sessionName: "Buổi định hướng học thuật",
-        status: "present",
-      },
-    ],
+    recentComment: data.recentComment || "Học viên mới nhập học.",
+    grades: [],
+    attendanceHistory: [],
   };
 
   store.students.unshift(newStudent);
@@ -251,18 +242,42 @@ export async function updateStudent(
   return updated;
 }
 
-export async function deleteStudent(id: unknown): Promise<void> {
+export async function archiveStudent(id: unknown): Promise<AdminStudentRecord> {
   const validId = validate(idSchema, id);
   const store = getRuntimeStore();
-  const index = store.students.findIndex((s) => s.id === validId);
-  if (index === -1) {
+  const student = store.students.find((s) => s.id === validId);
+  if (!student) {
     throw new NotFoundError("Student", validId);
   }
-  const [removed] = store.students.splice(index, 1);
-  const cls = store.classrooms.find((c) => c.id === removed.classId);
+  student.status = "archived";
+  student.deletedAt = new Date().toISOString();
+
+  const cls = store.classrooms.find((c) => c.id === student.classId);
   if (cls && cls.enrolled > 0) {
     cls.enrolled -= 1;
   }
+  return student;
+}
+
+export async function restoreStudent(id: unknown): Promise<AdminStudentRecord> {
+  const validId = validate(idSchema, id);
+  const store = getRuntimeStore();
+  const student = store.students.find((s) => s.id === validId);
+  if (!student) {
+    throw new NotFoundError("Student", validId);
+  }
+  student.status = "active";
+  student.deletedAt = null;
+
+  const cls = store.classrooms.find((c) => c.id === student.classId);
+  if (cls) {
+    cls.enrolled += 1;
+  }
+  return student;
+}
+
+export async function deleteStudent(id: unknown): Promise<void> {
+  await archiveStudent(id);
 }
 
 export async function recordGrade(input: unknown): Promise<AdminStudentRecord> {

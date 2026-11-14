@@ -94,6 +94,7 @@ enum StudentStatus {
   active
   trial
   on_leave
+  archived
 }
 
 enum UserRole {
@@ -219,6 +220,7 @@ model Student {
   parentContactMasked String
   status              StudentStatus      @default(active)
   recentComment       String
+  deletedAt           DateTime?
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
   grades              GradeRecord[]

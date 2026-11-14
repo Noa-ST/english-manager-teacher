@@ -234,7 +234,8 @@ export interface AdminStudentRecord {
   tuitionAmount: string;
   parentRelation: string;
   parentContactMasked: string;
-  status: "active" | "trial" | "on-leave";
+  status: "active" | "trial" | "on-leave" | "archived";
+  deletedAt?: string | null;
   recentComment: string;
   grades: {
     id: string;

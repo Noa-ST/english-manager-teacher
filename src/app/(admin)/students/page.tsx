@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  Archive,
   ArrowUpDown,
   CheckCircle2,
   Download,
@@ -9,6 +10,7 @@ import {
   Eye,
   FileUp,
   MailCheck,
+  RotateCcw,
   Search,
   Trash2,
   UserPlus,
@@ -19,6 +21,7 @@ import {
   type AdminStudentRecord,
 } from "@/services/classroom-data";
 import { apiRequest } from "@/lib/api-client";
+import { removeVietnameseTones } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog, ModalDialog } from "@/components/ui/dialog";
@@ -44,6 +47,7 @@ export default function AdminStudentsPage() {
   const [searchQuery, setSearchQuery] = React.useState("");
   const [classFilter, setClassFilter] = React.useState<string>("all");
   const [tuitionFilter, setTuitionFilter] = React.useState<string>("all");
+  const [statusFilter, setStatusFilter] = React.useState<"active" | "archived" | "all">("active");
   const [sortBy, setSortBy] = React.useState<"name" | "score" | "attendance">(
     "score",
   );
@@ -58,7 +62,7 @@ export default function AdminStudentsPage() {
   const [editingStudent, setEditingStudent] =
     React.useState<AdminStudentRecord | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = React.useState(false);
-  const [deletingStudent, setDeletingStudent] =
+  const [archivingStudent, setArchivingStudent] =
     React.useState<AdminStudentRecord | null>(null);
 
   // Form state for Create/Edit
@@ -81,14 +85,20 @@ export default function AdminStudentsPage() {
   }, []);
 
   const openCreateModal = () => {
-    const nextNumber = String(students.length + 1).padStart(2, "0");
+    let nextNum = students.length + 1;
+    let candidateCode = `HS-2026-${String(nextNum).padStart(2, "0")}`;
+    while (students.some((s) => s.code.toUpperCase() === candidateCode)) {
+      nextNum += 1;
+      candidateCode = `HS-2026-${String(nextNum).padStart(2, "0")}`;
+    }
+
     setEditingStudent(null);
     setFormName("");
-    setFormCode(`HS-2026-${nextNumber}`);
+    setFormCode(candidateCode);
     setFormClassId(CLASSROOMS_DATA[0]?.id ?? "cls-ii-01");
-    setFormGoal("IELTS 7.0 Overall");
-    setFormTuitionStatus("paid");
-    setFormComment("Tinh thần học tập chủ động, hoàn thành bài tập đúng hạn.");
+    setFormGoal("Đạt mục tiêu khóa học");
+    setFormTuitionStatus("due-soon");
+    setFormComment("");
     setIsCreateModalOpen(true);
   };
 
@@ -105,7 +115,39 @@ export default function AdminStudentsPage() {
 
   const handleSaveStudent = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formName.trim()) return;
+    if (!formName.trim()) {
+      toast({
+        title: "Thiếu thông tin",
+        description: "Vui lòng nhập họ và tên học sinh.",
+        variant: "error",
+      });
+      return;
+    }
+
+    const normalizedCode = formCode.trim().toUpperCase();
+    if (!normalizedCode) {
+      toast({
+        title: "Thiếu thông tin",
+        description: "Vui lòng nhập mã định danh học sinh.",
+        variant: "error",
+      });
+      return;
+    }
+
+    // Kiểm tra trùng mã học sinh trước khi gửi request
+    const isDuplicate = students.some(
+      (s) =>
+        s.code.toUpperCase() === normalizedCode &&
+        s.id !== editingStudent?.id,
+    );
+    if (isDuplicate) {
+      toast({
+        title: "Mã học sinh đã tồn tại",
+        description: `Mã "${normalizedCode}" đã được sử dụng cho một học sinh khác. Vui lòng nhập mã khác.`,
+        variant: "error",
+      });
+      return;
+    }
 
     const targetClass =
       CLASSROOMS_DATA.find((c) => c.id === formClassId) ?? CLASSROOMS_DATA[0];
@@ -117,7 +159,7 @@ export default function AdminStudentsPage() {
           {
             method: "PATCH",
             body: JSON.stringify({
-              code: formCode.trim().toUpperCase(),
+              code: normalizedCode,
               fullName: formName.trim(),
               classId: targetClass?.id ?? editingStudent.classId,
               targetGoal: formGoal.trim(),
@@ -129,29 +171,20 @@ export default function AdminStudentsPage() {
         setStudents((prev) =>
           prev.map((item) => (item.id === editingStudent.id ? updated : item)),
         );
-      } catch {
-        setStudents((prev) =>
-          prev.map((item) =>
-            item.id === editingStudent.id
-              ? {
-                  ...item,
-                  fullName: formName.trim(),
-                  code: formCode.trim().toUpperCase(),
-                  classId: targetClass?.id ?? item.classId,
-                  className: targetClass?.name ?? item.className,
-                  targetGoal: formGoal.trim(),
-                  tuitionStatus: formTuitionStatus,
-                  recentComment: formComment.trim(),
-                }
-              : item,
-          ),
-        );
+        toast({
+          title: "Đã cập nhật hồ sơ học sinh",
+          description: `Thông tin của ${formName} (${normalizedCode}) đã được lưu.`,
+          variant: "success",
+        });
+        setIsCreateModalOpen(false);
+      } catch (err) {
+        toast({
+          title: "Không thể cập nhật hồ sơ",
+          description:
+            err instanceof Error ? err.message : "Đã có lỗi xảy ra khi lưu thay đổi.",
+          variant: "error",
+        });
       }
-      toast({
-        title: "Đã cập nhật hồ sơ học sinh",
-        description: `Thông tin của ${formName} (${formCode}) đã được lưu.`,
-        variant: "success",
-      });
     } else {
       try {
         const created = await apiRequest<AdminStudentRecord>(
@@ -159,7 +192,7 @@ export default function AdminStudentsPage() {
           {
             method: "POST",
             body: JSON.stringify({
-              code: formCode.trim().toUpperCase(),
+              code: normalizedCode,
               fullName: formName.trim(),
               classId: targetClass?.id ?? "cls-ii-01",
               targetGoal: formGoal.trim(),
@@ -169,37 +202,75 @@ export default function AdminStudentsPage() {
           },
         );
         setStudents((prev) => [created, ...prev]);
-      } catch {
-        // Fallback if offline
+        toast({
+          title: "Đã thêm học sinh mới",
+          description: `Học sinh ${formName} (${normalizedCode}) đã được thêm vào danh sách.`,
+          variant: "success",
+        });
+        setIsCreateModalOpen(false);
+      } catch (err) {
+        toast({
+          title: "Không thể tạo hồ sơ học sinh",
+          description:
+            err instanceof Error ? err.message : "Đã có lỗi xảy ra khi thêm học sinh.",
+          variant: "error",
+        });
       }
-      toast({
-        title: "Đã thêm học sinh mới",
-        description: `Học sinh ${formName} (${formCode}) đã được thêm vào danh sách.`,
-        variant: "success",
-      });
     }
-
-    setIsCreateModalOpen(false);
   };
 
-  const handleDeleteConfirmed = async () => {
-    if (!deletingStudent) return;
+  const handleArchiveConfirmed = async () => {
+    if (!archivingStudent) return;
     try {
       await apiRequest(
-        `/api/admin/students/${encodeURIComponent(deletingStudent.id)}`,
+        `/api/admin/students/${encodeURIComponent(archivingStudent.id)}`,
         { method: "DELETE" },
       );
     } catch {
       // Fallback if offline
     }
-    setStudents((prev) => prev.filter((s) => s.id !== deletingStudent.id));
-    setSelectedIds((prev) => prev.filter((id) => id !== deletingStudent.id));
+    setStudents((prev) =>
+      prev.map((s) =>
+        s.id === archivingStudent.id
+          ? { ...s, status: "archived", deletedAt: new Date().toISOString() }
+          : s,
+      ),
+    );
+    setSelectedIds((prev) => prev.filter((id) => id !== archivingStudent.id));
     toast({
-      title: "Đã xóa hồ sơ học sinh",
-      description: `Hồ sơ ${deletingStudent.fullName} đã được chuyển vào lưu trữ.`,
+      title: "Đã lưu trữ hồ sơ học sinh",
+      description: `Hồ sơ ${archivingStudent.fullName} (${archivingStudent.code}) đã được chuyển vào mục Lưu trữ. Toàn bộ điểm số và học phí vẫn được bảo toàn.`,
       variant: "info",
     });
-    setDeletingStudent(null);
+    setArchivingStudent(null);
+  };
+
+  const handleRestoreStudent = async (stu: AdminStudentRecord) => {
+    try {
+      await apiRequest(
+        `/api/admin/students/${encodeURIComponent(stu.id)}/restore`,
+        { method: "POST" },
+      );
+    } catch (err) {
+      toast({
+        title: "Không thể khôi phục",
+        description: err instanceof Error ? err.message : "Đã có lỗi xảy ra.",
+        variant: "error",
+      });
+      return;
+    }
+    setStudents((prev) =>
+      prev.map((item) =>
+        item.id === stu.id
+          ? { ...item, status: "active", deletedAt: null }
+          : item,
+      ),
+    );
+    toast({
+      title: "Đã khôi phục hồ sơ",
+      description: `Học sinh ${stu.fullName} (${stu.code}) đã quay lại danh sách đang theo học.`,
+      variant: "success",
+    });
   };
 
   const filteredAndSorted = React.useMemo(() => {
@@ -207,13 +278,21 @@ export default function AdminStudentsPage() {
       const matchesClass = classFilter === "all" || s.classId === classFilter;
       const matchesTuition =
         tuitionFilter === "all" || s.tuitionStatus === tuitionFilter;
-      const q = searchQuery.trim().toLowerCase();
+      const matchesStatus =
+        statusFilter === "all"
+          ? true
+          : statusFilter === "archived"
+            ? s.status === "archived"
+            : s.status !== "archived";
+      const q = searchQuery.trim();
+      if (!q) return matchesClass && matchesTuition && matchesStatus;
+
+      const normQ = removeVietnameseTones(q);
       const matchesSearch =
-        !q ||
-        s.fullName.toLowerCase().includes(q) ||
-        s.code.toLowerCase().includes(q) ||
-        s.className.toLowerCase().includes(q);
-      return matchesClass && matchesTuition && matchesSearch;
+        removeVietnameseTones(s.fullName).includes(normQ) ||
+        removeVietnameseTones(s.code).includes(normQ) ||
+        removeVietnameseTones(s.className).includes(normQ);
+      return matchesClass && matchesTuition && matchesStatus && matchesSearch;
     });
 
     return [...filtered].sort((a, b) => {
@@ -221,7 +300,7 @@ export default function AdminStudentsPage() {
       if (sortBy === "attendance") return b.attendanceRate - a.attendanceRate;
       return b.averageScore - a.averageScore;
     });
-  }, [students, classFilter, tuitionFilter, searchQuery, sortBy]);
+  }, [students, classFilter, tuitionFilter, statusFilter, searchQuery, sortBy]);
 
   const totalPages = Math.max(
     1,
@@ -352,6 +431,24 @@ export default function AdminStudentsPage() {
             <option value="overdue">Quá hạn thanh toán</option>
           </select>
 
+          <select
+            value={statusFilter}
+            onChange={(e) => {
+              setStatusFilter(e.target.value as "active" | "archived" | "all");
+              setPage(1);
+            }}
+            aria-label="Lọc theo tình trạng học vụ"
+            className="h-8 rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
+          >
+            <option value="active">
+              Đang học ({students.filter((s) => s.status !== "archived").length})
+            </option>
+            <option value="archived">
+              Đã lưu trữ ({students.filter((s) => s.status === "archived").length})
+            </option>
+            <option value="all">Tất cả hồ sơ ({students.length})</option>
+          </select>
+
           <Button
             variant="outline"
             size="sm"
@@ -476,9 +573,19 @@ export default function AdminStudentsPage() {
                           .join("")}
                       </div>
                       <div>
-                        <p className="font-heading text-sm font-semibold text-foreground">
-                          {stu.fullName}
-                        </p>
+                        <div className="flex items-center gap-2">
+                          <p className="font-heading text-sm font-semibold text-foreground">
+                            {stu.fullName}
+                          </p>
+                          {stu.status === "archived" && (
+                            <Badge
+                              variant="outline"
+                              className="border-amber-400/60 bg-amber-500/10 text-[10px] font-medium text-amber-700"
+                            >
+                              Đã lưu trữ
+                            </Badge>
+                          )}
+                        </div>
                         <p className="font-mono text-xs text-muted-foreground">
                           {stu.code} · Mục tiêu: {stu.targetGoal}
                         </p>
@@ -494,14 +601,22 @@ export default function AdminStudentsPage() {
                     </p>
                   </TableCell>
                   <TableCell className="text-center">
-                    <Badge variant="default" className="font-mono">
-                      {stu.averageScore.toFixed(1)}
-                    </Badge>
+                    {stu.grades.length > 0 && stu.averageScore > 0 ? (
+                      <Badge variant="default" className="font-mono">
+                        {stu.averageScore.toFixed(1)}
+                      </Badge>
+                    ) : (
+                      <span className="font-mono text-xs text-muted-foreground" title="Chưa có bài kiểm tra">—</span>
+                    )}
                   </TableCell>
                   <TableCell className="text-center">
-                    <span className="font-mono text-xs font-semibold text-emerald-700">
-                      {stu.attendanceRate}%
-                    </span>
+                    {stu.attendanceHistory.length > 0 ? (
+                      <span className="font-mono text-xs font-semibold text-emerald-700">
+                        {stu.attendanceRate}%
+                      </span>
+                    ) : (
+                      <span className="font-mono text-xs text-muted-foreground" title="Chưa có dữ liệu điểm danh">—</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     <Badge
@@ -527,25 +642,42 @@ export default function AdminStudentsPage() {
                         size="icon-xs"
                         onClick={() => setViewingStudent(stu)}
                         aria-label={`Xem chi tiết ${stu.fullName}`}
+                        title="Xem chi tiết hồ sơ"
                       >
                         <Eye className="size-3.5 text-primary" aria-hidden="true" />
                       </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        onClick={() => openEditModal(stu)}
-                        aria-label={`Chỉnh sửa ${stu.fullName}`}
-                      >
-                        <Edit3 className="size-3.5" aria-hidden="true" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        onClick={() => setDeletingStudent(stu)}
-                        aria-label={`Xóa ${stu.fullName}`}
-                      >
-                        <Trash2 className="size-3.5 text-destructive" aria-hidden="true" />
-                      </Button>
+                      {stu.status === "archived" ? (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          onClick={() => handleRestoreStudent(stu)}
+                          aria-label={`Khôi phục ${stu.fullName}`}
+                          title="Khôi phục về danh sách đang học"
+                        >
+                          <RotateCcw className="size-3.5 text-emerald-600" aria-hidden="true" />
+                        </Button>
+                      ) : (
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            onClick={() => openEditModal(stu)}
+                            aria-label={`Chỉnh sửa ${stu.fullName}`}
+                            title="Chỉnh sửa hồ sơ"
+                          >
+                            <Edit3 className="size-3.5" aria-hidden="true" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            onClick={() => setArchivingStudent(stu)}
+                            aria-label={`Lưu trữ ${stu.fullName}`}
+                            title="Lưu trữ hồ sơ"
+                          >
+                            <Archive className="size-3.5 text-amber-600" aria-hidden="true" />
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -600,13 +732,17 @@ export default function AdminStudentsPage() {
               <div className="rounded-xl bg-background p-3.5">
                 <span className="text-muted-foreground">Điểm trung bình</span>
                 <p className="mt-1 font-mono text-xl font-bold text-primary">
-                  {viewingStudent.averageScore.toFixed(1)}
+                  {viewingStudent.grades.length > 0 && viewingStudent.averageScore > 0
+                    ? viewingStudent.averageScore.toFixed(1)
+                    : "—"}
                 </p>
               </div>
               <div className="rounded-xl bg-background p-3.5">
                 <span className="text-muted-foreground">Chuyên cần</span>
                 <p className="mt-1 font-mono text-xl font-bold text-emerald-700">
-                  {viewingStudent.attendanceRate}%
+                  {viewingStudent.attendanceHistory.length > 0
+                    ? `${viewingStudent.attendanceRate}%`
+                    : "—"}
                 </p>
               </div>
               <div className="rounded-xl bg-warm/60 p-3.5">
@@ -620,7 +756,9 @@ export default function AdminStudentsPage() {
             <div className="rounded-xl border border-border bg-warm/40 p-4">
               <p className="font-semibold text-primary">Nhận xét gần nhất của giáo viên:</p>
               <p className="mt-1 leading-relaxed text-foreground">
-                “{viewingStudent.recentComment}”
+                {viewingStudent.recentComment
+                  ? `“${viewingStudent.recentComment}”`
+                  : "Chưa có nhận xét."}
               </p>
             </div>
 
@@ -628,25 +766,31 @@ export default function AdminStudentsPage() {
               <h4 className="mb-2 font-heading text-sm font-bold text-foreground">
                 Bảng điểm các bài kiểm tra ({viewingStudent.grades.length})
               </h4>
-              <div className="space-y-2">
-                {viewingStudent.grades.map((g) => (
-                  <div
-                    key={g.id}
-                    className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-background p-3"
-                  >
-                    <div>
-                      <p className="font-semibold text-foreground">{g.assessmentTitle}</p>
-                      <p className="text-muted-foreground">
-                        Ngày: {g.date} · L:{g.listening} R:{g.reading} W:{g.writing} S:
-                        {g.speaking}
-                      </p>
+              {viewingStudent.grades.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-border bg-background p-4 text-center text-xs text-muted-foreground">
+                  Học sinh mới nhập học, chưa có bài kiểm tra nào được ghi nhận.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {viewingStudent.grades.map((g) => (
+                    <div
+                      key={g.id}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-background p-3"
+                    >
+                      <div>
+                        <p className="font-semibold text-foreground">{g.assessmentTitle}</p>
+                        <p className="text-muted-foreground">
+                          Ngày: {g.date} · L:{g.listening} R:{g.reading} W:{g.writing} S:
+                          {g.speaking}
+                        </p>
+                      </div>
+                      <Badge variant="default" className="font-mono">
+                        Overall {g.overall.toFixed(1)}
+                      </Badge>
                     </div>
-                    <Badge variant="default" className="font-mono">
-                      Overall {g.overall.toFixed(1)}
-                    </Badge>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -792,19 +936,19 @@ export default function AdminStudentsPage() {
         </form>
       </ModalDialog>
 
-      {/* Delete Confirmation */}
+      {/* Archive Confirmation Dialog */}
       <ConfirmDialog
-        open={Boolean(deletingStudent)}
-        onClose={() => setDeletingStudent(null)}
-        onConfirm={handleDeleteConfirmed}
+        open={Boolean(archivingStudent)}
+        onClose={() => setArchivingStudent(null)}
+        onConfirm={handleArchiveConfirmed}
         title="Xác nhận lưu trữ hồ sơ học sinh?"
         description={
-          deletingStudent
-            ? `Bạn có chắc chắn muốn xóa học sinh "${deletingStudent.fullName}" (${deletingStudent.code}) khỏi danh sách đang theo học?`
+          archivingStudent
+            ? `Hồ sơ "${archivingStudent.fullName}" (${archivingStudent.code}) sẽ được chuyển vào mục Lưu trữ. Sĩ số lớp sẽ tự động giảm 1, toàn bộ điểm số và lịch sử học tập vẫn được bảo lưu an toàn.`
             : ""
         }
-        confirmLabel="Xóa hồ sơ"
-        variant="destructive"
+        confirmLabel="Lưu trữ hồ sơ"
+        variant="default"
       />
     </div>
   );

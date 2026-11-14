@@ -7,6 +7,10 @@ import {
   ArrowRight,
   Award,
   Calendar,
+  CalendarCheck,
+  ChevronDown,
+  ChevronUp,
+  Clock,
   Download,
   FileText,
   FolderOpen,
@@ -40,20 +44,42 @@ import { AudioPlayer } from "@/components/viewer/audio-player";
 import { cn } from "@/lib/utils";
 
 const SCHEDULE_DAYS = [
-  { value: 1, shortLabel: "Th 2", subLabel: "T2" },
-  { value: 2, shortLabel: "Th 3", subLabel: "T3" },
-  { value: 3, shortLabel: "Th 4", subLabel: "T4" },
-  { value: 4, shortLabel: "Th 5", subLabel: "T5" },
-  { value: 5, shortLabel: "Th 6", subLabel: "T6" },
-  { value: 6, shortLabel: "Th 7", subLabel: "T7" },
-  { value: 7, shortLabel: "CN", subLabel: "CN" },
-];
+  { value: 1, shortLabel: "Th 2", subLabel: "T2", dayName: "Thứ Hai" },
+  { value: 2, shortLabel: "Th 3", subLabel: "T3", dayName: "Thứ Ba" },
+  { value: 3, shortLabel: "Th 4", subLabel: "T4", dayName: "Thứ Tư" },
+  { value: 4, shortLabel: "Th 5", subLabel: "T5", dayName: "Thứ Năm" },
+  { value: 5, shortLabel: "Th 6", subLabel: "T6", dayName: "Thứ Sáu" },
+  { value: 6, shortLabel: "Th 7", subLabel: "T7", dayName: "Thứ Bảy" },
+  { value: 7, shortLabel: "CN", subLabel: "CN", dayName: "Chủ Nhật" },
+] as const;
+
+const emptySubscribe = () => () => {};
+const getClientToday = () => {
+  const d = new Date().getDay();
+  return d === 0 ? 7 : d;
+};
+const getServerToday = () => 4;
 
 export default function ViewerHomePage() {
   const { toast } = useToast();
-  // Default to 0 (shows representative weekly classes; clicking a day filters by that day)
-  const [selectedDay, setSelectedDay] = React.useState<number>(0);
-  const [showAllSchedule, setShowAllSchedule] = React.useState<boolean>(false);
+  // Safe SSR hydration using useSyncExternalStore (defaults to Thursday on server, real day on client)
+  const [userSelectedDay, setUserSelectedDay] = React.useState<number | null>(null);
+  const clientToday = React.useSyncExternalStore(
+    emptySubscribe,
+    getClientToday,
+    getServerToday
+  );
+  const selectedDay = userSelectedDay ?? clientToday;
+  const setSelectedDay = React.useCallback((day: number) => {
+    setUserSelectedDay(day);
+  }, []);
+
+  const [isScheduleExpanded, setIsScheduleExpanded] =
+    React.useState<boolean>(false);
+  const [currentUser, setCurrentUser] = React.useState<{
+    role?: "admin" | "student";
+    studentId?: string;
+  } | null>(null);
 
   const [teacher, setTeacher] = React.useState<TeacherProfile>(TEACHER_PROFILE);
   const [announcements, setAnnouncements] =
@@ -96,6 +122,16 @@ export default function ViewerHomePage() {
       .catch(() => {
         // Fallback to static seed on offline
       });
+
+    // Detect logged-in role to route "Xem toàn bộ lịch học" accurately
+    fetch("/api/auth/me")
+      .then((res) => res.json())
+      .then((payload) => {
+        if (payload?.ok && payload?.data?.user) {
+          setCurrentUser(payload.data.user);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const urgentAnnouncement =
@@ -104,16 +140,29 @@ export default function ViewerHomePage() {
     .filter((item) => item.id !== urgentAnnouncement?.id)
     .slice(0, 3);
 
-  const displayedSchedule = React.useMemo(() => {
-    if (selectedDay !== 0) {
-      return schedule.filter((session) => session.dayOfWeek === selectedDay);
+  // Filter schedule strictly by the selected day
+  const daySessions = React.useMemo(() => {
+    return schedule.filter((session) => session.dayOfWeek === selectedDay);
+  }, [schedule, selectedDay]);
+
+  // Limit initial display to 2 sessions if multiple, expandable with "Xem thêm"
+  const visibleScheduleSessions = React.useMemo(() => {
+    if (isScheduleExpanded || daySessions.length <= 2) {
+      return daySessions;
     }
-    if (showAllSchedule) {
-      return schedule;
-    }
-    // Representative 3 distinct courses when in compact overview mode
-    return schedule.slice(0, 3);
-  }, [selectedDay, showAllSchedule, schedule]);
+    return daySessions.slice(0, 2);
+  }, [daySessions, isScheduleExpanded]);
+
+  const selectedDayMeta = React.useMemo(() => {
+    return (
+      SCHEDULE_DAYS.find((d) => d.value === selectedDay) ?? SCHEDULE_DAYS[3]
+    );
+  }, [selectedDay]);
+
+  const fullScheduleUrl = React.useMemo(() => {
+    if (currentUser?.role === "admin") return "/schedule";
+    return "/student/schedule";
+  }, [currentUser]);
 
   const featuredHonors = React.useMemo(
     () => hallOfFame.slice(0, 4),
@@ -472,113 +521,232 @@ export default function ViewerHomePage() {
 
           {/* Right Column (5 cols): 02. LỊCH DẠY & CÁC KHÓA HỌC TRONG TUẦN */}
           <div id="weekly-schedule" className="scroll-mt-24 lg:col-span-5">
-            <div className="rounded-2xl border border-[#DCE5F4] bg-[#EAF0FA]/85 p-5 sm:p-6">
-              {/* Section 02 Header */}
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Calendar className="size-4 text-[#243B64]" aria-hidden="true" />
-                  <h2 className="font-heading text-sm font-bold tracking-wide text-[#243B64] uppercase sm:text-[15px]">
-                    <span className="font-normal text-[#7B8497]">02.</span> LỊCH DẠY &amp; CÁC KHÓA HỌC TRONG TUẦN
-                  </h2>
+            <div className="flex h-full flex-col justify-between rounded-2xl border border-[#DCE5F4] bg-[#F4F7FC] p-5 shadow-2xs sm:p-6">
+              <div>
+                {/* Section 02 Header with Total Counter Badge */}
+                <div className="flex items-center justify-between gap-2 border-b border-[#DCE5F4]/70 pb-3">
+                  <div className="flex items-center gap-2">
+                    <Calendar className="size-4 text-[#243B64]" aria-hidden="true" />
+                    <h2 className="font-heading text-sm font-bold tracking-wide text-[#243B64] uppercase sm:text-[14.5px]">
+                      <span className="font-normal text-[#7B8497]">02.</span> LỊCH DẠY &amp; CÁC KHÓA HỌC
+                    </h2>
+                  </div>
+                  <span className="rounded-full border border-[#DCE5F4] bg-white px-2.5 py-0.5 font-mono text-[11px] font-semibold text-[#243B64]">
+                    {schedule.length} ca/tuần
+                  </span>
                 </div>
-              </div>
 
-              {/* Day of Week Selector Bar */}
-              <div
-                className="mt-4 grid grid-cols-7 gap-1 rounded-xl border border-[#DCE5F4] bg-white/90 p-1.5"
-                role="tablist"
-                aria-label="Chọn ngày trong tuần"
-              >
-                {SCHEDULE_DAYS.map((day) => {
-                  // Highlight Wednesday (Th 4) visually when in default overview (0) to match reference, or active day when clicked
-                  const isSelected =
-                    selectedDay === day.value || (selectedDay === 0 && day.value === 4);
-                  return (
-                    <button
-                      key={day.value}
-                      type="button"
-                      role="tab"
-                      aria-selected={isSelected}
-                      onClick={() =>
-                        setSelectedDay((prev) => (prev === day.value ? 0 : day.value))
-                      }
-                      className={cn(
-                        "flex flex-col items-center justify-center rounded-lg py-1.5 text-center transition-all select-none",
-                        isSelected
-                          ? "bg-[#243B64] text-white shadow-xs"
-                          : "text-[#556075] hover:bg-[#EAF0FA] hover:text-[#243B64]",
-                      )}
-                    >
-                      <span className="text-[11px] font-bold">{day.shortLabel}</span>
-                      <span
+                {/* 7-Day of Week Selector Bar with class indicators (Requirement 2 & 9) */}
+                <div
+                  className="mt-3.5 grid grid-cols-7 gap-1 rounded-xl border border-[#DCE5F4] bg-white p-1.5 shadow-2xs"
+                  role="tablist"
+                  aria-label="Chọn ngày trong tuần"
+                >
+                  {SCHEDULE_DAYS.map((day) => {
+                    const isSelected = selectedDay === day.value;
+                    const sessionCount = schedule.filter(
+                      (s) => s.dayOfWeek === day.value,
+                    ).length;
+                    const hasSessions = sessionCount > 0;
+
+                    return (
+                      <button
+                        key={day.value}
+                        type="button"
+                        role="tab"
+                        aria-selected={isSelected}
+                        onClick={() => {
+                          setSelectedDay(day.value);
+                          setIsScheduleExpanded(false);
+                        }}
                         className={cn(
-                          "mt-0.5 text-[10px]",
-                          isSelected ? "font-semibold text-[#F7F0E2]" : "text-[#7B8497]",
+                          "relative flex flex-col items-center justify-center rounded-lg py-1.5 text-center transition-all select-none",
+                          isSelected
+                            ? "bg-[#243B64] text-white shadow-xs"
+                            : hasSessions
+                              ? "text-[#253047] hover:bg-[#EAF0FA] hover:text-[#243B64]"
+                              : "text-[#9AA2B1] opacity-70 hover:bg-[#F4F7FC]",
                         )}
                       >
-                        {day.subLabel}
+                        <span className="text-[11px] font-bold">{day.shortLabel}</span>
+                        <span
+                          className={cn(
+                            "mt-0.5 text-[10px]",
+                            isSelected
+                              ? "font-semibold text-[#F7F0E2]"
+                              : hasSessions
+                                ? "text-[#556075]"
+                                : "text-[#9AA2B1]",
+                          )}
+                        >
+                          {day.subLabel}
+                        </span>
+
+                        {/* Visual indicator dot for days with classes */}
+                        {hasSessions && !isSelected && (
+                          <span
+                            className="mt-0.5 size-1 rounded-full bg-[#D9AE54]"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Contextual Day Overview Header (Requirement 7) */}
+                <div className="mt-3.5 flex items-center justify-between px-0.5 text-xs">
+                  <div className="flex items-center gap-1.5 font-semibold text-[#243B64]">
+                    <Clock className="size-3.5 text-[#D9AE54]" aria-hidden="true" />
+                    <span>
+                      {selectedDayMeta.dayName}:{" "}
+                      <span className="font-bold text-[#253047]">
+                        {daySessions.length > 0
+                          ? `${daySessions.length} ca học`
+                          : "Không có ca học"}
                       </span>
-                    </button>
-                  );
-                })}
-              </div>
+                    </span>
+                  </div>
+                  {daySessions.some((s) => s.status === "ongoing") && (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-700">
+                      <span className="relative flex size-1.5">
+                        <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                        <span className="relative inline-flex size-1.5 rounded-full bg-emerald-500" />
+                      </span>
+                      Đang diễn ra ca học
+                    </span>
+                  )}
+                </div>
 
-              {/* Class Rows List */}
-              <div className="mt-3.5 space-y-2.5">
-                {displayedSchedule.map((session) => {
-                  const shortRoom = session.room.replace("Phòng ", "P.");
-                  return (
-                    <div
-                      key={session.id}
-                      className="flex items-center justify-between gap-3 rounded-xl border border-[#E3E7EF] bg-white px-4 py-3 shadow-2xs transition-colors hover:border-[#243B64]/30"
-                    >
-                      <div className="min-w-0">
-                        <h3 className="truncate font-heading text-xs font-bold text-[#253047] sm:text-[13.5px]">
-                          {session.className}
-                        </h3>
-                        <p className="mt-0.5 truncate text-[11px] text-[#7B8497]">
-                          {session.dayLabel} · {session.topic}
-                        </p>
+                {/* Class Sessions List strictly for selected day (Requirements 3 & 5) */}
+                <div className="mt-3 space-y-2.5">
+                  {daySessions.length === 0 ? (
+                    /* Clean Empty State when no classes scheduled (Requirement 9) */
+                    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-[#DCE5F4] bg-white/70 px-4 py-8 text-center">
+                      <div className="flex size-10 items-center justify-center rounded-full bg-[#EAF0FA] text-[#243B64]">
+                        <CalendarCheck className="size-5" aria-hidden="true" />
                       </div>
-
-                      <div className="flex shrink-0 items-center gap-2.5">
-                        <span className="font-mono text-xs font-medium text-[#556075]">
-                          {session.startTime} – {session.endTime}
-                        </span>
-                        <span className="rounded-md bg-[#EAF0FA] px-2.5 py-1 font-mono text-xs font-bold text-[#243B64]">
-                          {shortRoom}
-                        </span>
-                      </div>
+                      <p className="mt-2.5 font-heading text-xs font-bold text-[#243B64]">
+                        Không có ca học nào trong {selectedDayMeta.dayName}
+                      </p>
+                      <p className="mt-1 max-w-xs text-[11px] leading-relaxed text-[#7B8497]">
+                        Thời gian dành cho giáo viên chấm chữa bài viết 1:1, tư vấn học thuật và học viên tự học.
+                      </p>
                     </div>
-                  );
-                })}
-              </div>
+                  ) : (
+                    visibleScheduleSessions.map((session) => {
+                      const shortRoom = session.room.replace("Phòng ", "P.");
+                      const isCompleted = session.status === "completed";
+                      const isOngoing = session.status === "ongoing";
 
-              {/* Footer Action inside Schedule Box */}
-              <div className="mt-4 flex items-center justify-between pt-1 text-xs">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedDay(0);
-                    setShowAllSchedule((prev) => !prev);
-                  }}
-                  className="inline-flex items-center gap-1 font-semibold text-[#243B64] hover:underline"
-                >
-                  {showAllSchedule && selectedDay === 0
-                    ? "Thu gọn lịch học"
-                    : `Xem chi tiết lịch học (${schedule.length} ca/tuần)`}
-                  <ArrowRight className="size-3.5" aria-hidden="true" />
-                </button>
+                      return (
+                        <div
+                          key={session.id}
+                          className={cn(
+                            "rounded-xl border bg-white p-3.5 shadow-2xs transition-all hover:border-[#243B64]/40 hover:shadow-xs",
+                            isCompleted ? "border-[#E3E7EF] opacity-75" : "border-[#DCE5F4]",
+                          )}
+                        >
+                          {/* Row 1: Class Name & Room (Requirement 5) */}
+                          <div className="flex items-start justify-between gap-2.5">
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="rounded bg-[#EAF0FA] px-1.5 py-0.5 font-mono text-[10.5px] font-bold text-[#243B64]">
+                                  {session.classCode}
+                                </span>
+                                <span className="text-[10.5px] font-medium text-[#7B8497]">
+                                  {session.level}
+                                </span>
+                              </div>
+                              <h3 className="mt-1 font-heading text-xs font-bold leading-snug text-[#253047] sm:text-[13.5px]">
+                                {session.className}
+                              </h3>
+                            </div>
 
-                {selectedDay !== 0 && (
+                            <span className="shrink-0 rounded-md border border-[#DCE5F4] bg-[#EAF0FA] px-2 py-0.5 font-mono text-xs font-bold text-[#243B64]">
+                              {shortRoom}
+                            </span>
+                          </div>
+
+                          {/* Row 2: Time & Status (Requirement 5) */}
+                          <div className="mt-2.5 flex items-center justify-between border-t border-[#F1F4FA] pt-2 text-xs">
+                            <div className="flex items-center gap-1.5 font-mono text-[11.5px] text-[#556075]">
+                              <Clock className="size-3 text-[#D9AE54]" aria-hidden="true" />
+                              <span>
+                                {session.startTime} – {session.endTime}
+                              </span>
+                            </div>
+
+                            {isOngoing && (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                <span className="relative flex size-1.5">
+                                  <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                                  <span className="relative inline-flex size-1.5 rounded-full bg-emerald-500" />
+                                </span>
+                                Đang học
+                              </span>
+                            )}
+                            {session.status === "upcoming" && (
+                              <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
+                                Sắp diễn ra
+                              </span>
+                            )}
+                            {isCompleted && (
+                              <span className="rounded-full border border-gray-200 bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">
+                                Đã kết thúc
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Row 3: Brief Lesson Content (Requirement 5) */}
+                          <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-[#556075]">
+                            <span className="font-semibold text-[#253047]">Nội dung:</span>{" "}
+                            {session.topic}
+                          </p>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Expand / Collapse Button if multiple sessions on day (Requirement 6) */}
+                {daySessions.length > 2 && (
                   <button
                     type="button"
-                    onClick={() => setSelectedDay(0)}
-                    className="text-[11px] font-medium text-[#496B9A] hover:underline"
+                    onClick={() => setIsScheduleExpanded((prev) => !prev)}
+                    className="mt-2.5 flex w-full items-center justify-center gap-1 rounded-lg border border-[#DCE5F4] bg-white py-1.5 text-xs font-semibold text-[#243B64] transition-colors hover:bg-[#EAF0FA]"
                   >
-                    Xem cả tuần
+                    {isScheduleExpanded ? (
+                      <>
+                        <span>Thu gọn danh sách ca học</span>
+                        <ChevronUp className="size-3.5" aria-hidden="true" />
+                      </>
+                    ) : (
+                      <>
+                        <span>Xem thêm ({daySessions.length - 2} ca học khác trong ngày)</span>
+                        <ChevronDown className="size-3.5" aria-hidden="true" />
+                      </>
+                    )}
                   </button>
                 )}
+              </div>
+
+              {/* Footer CTA: "Xem toàn bộ lịch học" (Requirement 8) */}
+              <div className="mt-4 border-t border-[#DCE5F4] pt-3">
+                <Link
+                  href={fullScheduleUrl as never}
+                  className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-[#243B64] text-xs font-semibold text-white shadow-2xs transition-all hover:bg-[#1E3458]"
+                >
+                  <span>Xem toàn bộ lịch học</span>
+                  <ArrowRight className="size-3.5" aria-hidden="true" />
+                </Link>
+                <p className="mt-1.5 text-center text-[10.5px] text-[#7B8497]">
+                  {currentUser?.role === "admin"
+                    ? "Quản trị lịch dạy dành cho Giáo viên (ADMIN)"
+                    : currentUser?.role === "student"
+                      ? "Xem lịch học chi tiết của lớp bạn đang theo học"
+                      : "Học sinh & phụ huynh tra cứu lịch học lớp chính thức"}
+                </p>
               </div>
             </div>
           </div>
