@@ -29,7 +29,7 @@ import {
   UnauthorizedError,
   ValidationError,
 } from "./errors";
-import { getRuntimeStore } from "./runtime-store";
+import { getRuntimeStore, saveRuntimeStore } from "./runtime-store";
 
 /**
  * Unified Multi-Provider Storage Service
@@ -1183,6 +1183,8 @@ export async function deleteFile(input: DeleteFileInput): Promise<StoredFileReco
     detail: `Đã xóa tệp "${record.originalName}" khỏi ${record.provider}`,
   });
 
+  saveRuntimeStore(store);
+
   return record;
 }
 
@@ -1655,6 +1657,8 @@ export async function createResourceFile(
     referencedBy: [],
   });
 
+  saveRuntimeStore(store);
+
   return newFile;
 }
 
@@ -1691,6 +1695,8 @@ export async function toggleResourceFileVisibility(
     sf.updatedAt = new Date().toISOString();
   }
 
+  saveRuntimeStore(store);
+
   return updated;
 }
 
@@ -1712,4 +1718,5 @@ export async function deleteResourceFile(id: unknown): Promise<void> {
   if (folder && folder.itemCount > 0) {
     folder.itemCount -= 1;
   }
+  saveRuntimeStore(store);
 }

@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { validate } from "./common";
-import { getRuntimeStore, type SystemSettingsState } from "./runtime-store";
+import { getRuntimeStore, saveRuntimeStore, type SystemSettingsState } from "./runtime-store";
 
 export const updateSettingsSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
@@ -31,6 +31,7 @@ export async function updateSystemSettings(
     ...store.settings,
     ...data,
   };
+  saveRuntimeStore(store);
 
   return store.settings;
 }

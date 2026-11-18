@@ -10,6 +10,7 @@ export type ErrorCode =
   | "NOT_FOUND"
   | "CONFLICT"
   | "NOT_IMPLEMENTED"
+  | "TOO_MANY_REQUESTS"
   | "INTERNAL_ERROR";
 
 export interface ApiErrorBody {

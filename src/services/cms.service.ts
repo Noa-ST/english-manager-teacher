@@ -7,7 +7,7 @@ import type {
 } from "./classroom-data";
 import { idSchema, validate } from "./common";
 import { NotFoundError } from "./errors";
-import { getRuntimeStore } from "./runtime-store";
+import { getRuntimeStore, saveRuntimeStore } from "./runtime-store";
 
 // -----------------------------------------------------------------------------
 // 1. ANNOUNCEMENTS
@@ -99,6 +99,7 @@ export async function createAnnouncement(
   };
 
   store.announcements.unshift(newItem);
+  saveRuntimeStore(store);
   return newItem;
 }
 
@@ -131,6 +132,7 @@ export async function updateAnnouncement(
   };
 
   store.announcements[idx] = updated;
+  saveRuntimeStore(store);
   return updated;
 }
 
@@ -140,6 +142,7 @@ export async function deleteAnnouncement(id: unknown): Promise<void> {
   const idx = store.announcements.findIndex((a) => a.id === validId);
   if (idx === -1) throw new NotFoundError("Announcement", validId);
   store.announcements.splice(idx, 1);
+  saveRuntimeStore(store);
 }
 
 // -----------------------------------------------------------------------------
@@ -222,6 +225,7 @@ export async function createHallOfFameEntry(
   };
 
   store.hallOfFame.unshift(newEntry);
+  saveRuntimeStore(store);
   return newEntry;
 }
 
@@ -231,6 +235,7 @@ export async function deleteHallOfFameEntry(id: unknown): Promise<void> {
   const idx = store.hallOfFame.findIndex((h) => h.id === validId);
   if (idx === -1) throw new NotFoundError("HallOfFameEntry", validId);
   store.hallOfFame.splice(idx, 1);
+  saveRuntimeStore(store);
 }
 
 // -----------------------------------------------------------------------------
@@ -318,6 +323,7 @@ export async function createStudentProject(
   };
 
   store.projects.unshift(newProj);
+  saveRuntimeStore(store);
   return newProj;
 }
 
@@ -327,5 +333,6 @@ export async function deleteStudentProject(id: unknown): Promise<void> {
   const idx = store.projects.findIndex((p) => p.id === validId);
   if (idx === -1) throw new NotFoundError("StudentProject", validId);
   store.projects.splice(idx, 1);
+  saveRuntimeStore(store);
 }
 

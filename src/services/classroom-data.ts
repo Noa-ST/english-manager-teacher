@@ -67,6 +67,42 @@ export interface WeeklyClassSession {
   hasConflict?: boolean;
 }
 
+export interface TimeSlotDef {
+  id: string;
+  label: string;
+  startTime: string;
+  endTime: string;
+  period: "morning" | "afternoon" | "evening";
+  isCustom?: boolean;
+}
+
+export const STANDARD_TIME_SLOTS: TimeSlotDef[] = [
+  { id: "m1", label: "Sáng sớm", startTime: "08:30", endTime: "10:30", period: "morning" },
+  { id: "m2", label: "Sáng", startTime: "09:00", endTime: "11:00", period: "morning" },
+  { id: "a1", label: "Chiều", startTime: "14:30", endTime: "16:30", period: "afternoon" },
+  { id: "e1", label: "Tối 1", startTime: "17:45", endTime: "19:45", period: "evening" },
+  { id: "e2", label: "Tối 2", startTime: "18:00", endTime: "20:15", period: "evening" },
+  { id: "e3", label: "Tối muộn", startTime: "19:50", endTime: "21:30", period: "evening" },
+];
+
+export const DAYS_OF_WEEK = [
+  { dayNumber: 1, label: "Thứ 2", short: "T2", fullLabel: "Thứ Hai" },
+  { dayNumber: 2, label: "Thứ 3", short: "T3", fullLabel: "Thứ Ba" },
+  { dayNumber: 3, label: "Thứ 4", short: "T4", fullLabel: "Thứ Tư" },
+  { dayNumber: 4, label: "Thứ 5", short: "T5", fullLabel: "Thứ Năm" },
+  { dayNumber: 5, label: "Thứ 6", short: "T6", fullLabel: "Thứ Sáu" },
+  { dayNumber: 6, label: "Thứ 7", short: "T7", fullLabel: "Thứ Bảy" },
+  { dayNumber: 7, label: "Chủ Nhật", short: "CN", fullLabel: "Chủ Nhật" },
+];
+
+export const STANDARD_ROOMS = [
+  "Phòng 302 · Cơ sở Nguyễn Du",
+  "Phòng 204 · Cơ sở Nguyễn Du",
+  "Phòng 401 · Cơ sở Nguyễn Du",
+  "Phòng Lab 1 · Cơ sở Nguyễn Du",
+  "Phòng 502 · Cơ sở Nguyễn Du",
+];
+
 export interface HallOfFameStudent {
   id: string;
   displayName: string;
@@ -202,6 +238,80 @@ export interface OrphanedStorageObject {
   createdAt: string;
 }
 
+export type WeekProgressStatus =
+  | "not-started"
+  | "in-progress"
+  | "completed"
+  | "postponed";
+
+export interface MaterialClassAssignment {
+  classId: string;
+  classCode: string;
+  className: string;
+  weekNumber: number;
+  assignedAt?: string;
+}
+
+export interface CurriculumAttachment {
+  id: string;
+  name: string;
+  url: string;
+  size: string;
+  sizeBytes?: number;
+  type: "PDF" | "DOCX" | "SLIDE" | "WORKSHEET" | "IMAGE" | "AUDIO";
+  uploadedAt: string;
+  classId?: string;
+  classCode?: string;
+  weekNumber?: number;
+  assignments?: MaterialClassAssignment[];
+}
+
+export interface MasterCurriculumMaterial {
+  id: string;
+  name: string;
+  url: string;
+  size: string;
+  sizeBytes?: number;
+  type: "PDF" | "DOCX" | "SLIDE" | "WORKSHEET" | "IMAGE" | "AUDIO";
+  uploadedAt: string;
+  assignments: MaterialClassAssignment[];
+}
+
+export interface CurriculumWeek {
+  weekNumber: number;
+  title: string;
+  focus?: string;
+  status?: WeekProgressStatus;
+  scheduledDate?: string;
+  completedDate?: string;
+  teacherName?: string;
+  notes?: string;
+  homework?: string;
+  materialsCount?: number;
+  attachments?: CurriculumAttachment[];
+}
+
+/** Helper to determine the effective progress status of a curriculum week */
+export function resolveWeekStatus(
+  week: CurriculumWeek,
+  currentWeekIndex?: number,
+): WeekProgressStatus {
+  if (week.status) return week.status;
+  const activeWeek = currentWeekIndex ?? 1;
+  if (week.weekNumber < activeWeek) return "completed";
+  if (week.weekNumber === activeWeek) return "in-progress";
+  return "not-started";
+}
+
+export interface CurriculumPreset {
+  id: string;
+  name: string;
+  level: string;
+  targetBand: string;
+  totalWeeks: number;
+  curriculum: CurriculumWeek[];
+}
+
 export interface ClassroomGroup {
   id: string;
   code: string;
@@ -215,7 +325,11 @@ export interface ClassroomGroup {
   attendanceRate: number;
   averageScore: number;
   currentModule: string;
-  status: "active" | "upcoming" | "completed";
+  status: "active" | "upcoming" | "completed" | "archived";
+  totalWeeks?: number;
+  currentWeekIndex?: number;
+  curriculum?: CurriculumWeek[];
+  tuitionDueDate?: string;
 }
 
 export interface AdminStudentRecord {
@@ -249,11 +363,87 @@ export interface AdminStudentRecord {
     comment: string;
   }[];
   attendanceHistory: {
+    sessionId?: string;
     date: string;
     sessionName: string;
     status: "present" | "late" | "absent" | "excused";
     note?: string;
   }[];
+}
+
+// -----------------------------------------------------------------------------
+// TEACHING JOURNAL, SESSION LEARNING HISTORY & CLASS ANALYTICS CONTRACTS
+// -----------------------------------------------------------------------------
+
+export type JournalStatus = "completed" | "draft" | "not-started";
+export type SessionCompletionResult = "completed" | "partial" | "not-completed";
+export type SessionHomeworkStatus = "submitted" | "not-submitted" | "exempt" | "unrecorded";
+export type SessionLearningStatus = "good" | "satisfactory" | "needs-support" | "unrecorded";
+export type SessionSkillType = "Listening" | "Reading" | "Writing" | "Speaking" | "General";
+
+export interface SessionAttachment {
+  id: string;
+  name: string;
+  type: "PDF" | "SLIDE" | "IMAGE" | "DOCX" | "WORKSHEET";
+  size: string;
+  url?: string;
+}
+
+export interface JournalRevision {
+  id: string;
+  updatedAt: string;
+  summary: string;
+  previousTopic: string;
+  previousNotes: string;
+  previousCompletionResult: SessionCompletionResult;
+}
+
+export interface SessionStudentRecord {
+  id: string;
+  sessionId: string;
+  studentId: string;
+  studentCode: string;
+  studentName: string;
+  attendance: "present" | "excused" | "absent" | "late";
+  homeworkStatus: SessionHomeworkStatus;
+  learningStatus: SessionLearningStatus;
+  skill: SessionSkillType;
+  score?: number | null;
+  teacherFeedback: string;
+  followUp: string;
+}
+
+export interface ClassSessionRecord {
+  /** Central identifier linking schedule, teaching journal, and student learning history */
+  id: string;
+  classId: string;
+  classCode: string;
+  className: string;
+  /** Calendar date in YYYY-MM-DD format */
+  date: string;
+  dayLabel: string;
+  startTime: string;
+  endTime: string;
+  room: string;
+  weekNumber: number;
+  topic: string;
+  objectives: string;
+  completionResult: SessionCompletionResult;
+  generalNotes: string;
+  homework: string;
+  nextSessionPlan: string;
+  journalStatus: JournalStatus;
+  attachments: SessionAttachment[];
+  revisions: JournalRevision[];
+  studentRecords: SessionStudentRecord[];
+  updatedAt: string;
+}
+
+export interface AnalyticsAlertAckRecord {
+  alertId: string;
+  status: "active" | "acknowledged" | "resolved";
+  updatedAt: string;
+  note?: string;
 }
 
 // -----------------------------------------------------------------------------
@@ -1192,6 +1382,188 @@ export const STORED_FILES_DATA: StoredFileRecord[] = [
 ];
 
 // -----------------------------------------------------------------------------
+// 7.5. CURRICULUM PRESETS (KHUNG GIÁO TRÌNH MẪU ĐỊNH SẴN)
+// -----------------------------------------------------------------------------
+
+export const CURRICULUM_PRESETS: CurriculumPreset[] = [
+  {
+    id: "preset-basic-8w",
+    name: "Mất gốc & Lấy lại căn bản cấp tốc (8 tuần)",
+    level: "A1 → A2",
+    targetBand: "IELTS 3.0–3.5+",
+    totalWeeks: 8,
+    curriculum: [
+      { weekNumber: 1, title: "Bảng phiên âm IPA & Chuẩn hóa phát âm" },
+      { weekNumber: 2, title: "12 thì cơ bản & Ngữ pháp cấu trúc câu" },
+      { weekNumber: 3, title: "Danh từ, Đại từ & Giới từ thông dụng" },
+      { weekNumber: 4, title: "Kỹ năng nghe hội thoại sinh hoạt hàng ngày" },
+      { weekNumber: 5, title: "Kỹ năng đọc hiểu mẩu tin & thư ngắn" },
+      { weekNumber: 6, title: "Thực hành nói phản xạ giao tiếp căn bản" },
+      { weekNumber: 7, title: "Mở rộng vốn từ vựng gia đình & công việc" },
+      { weekNumber: 8, title: "Ôn tập tổng hợp & Kiểm tra đánh giá cuối khóa" },
+    ],
+  },
+  {
+    id: "preset-found-14w",
+    name: "IELTS Foundation (Band 5.0–6.0) (14 tuần)",
+    level: "B1+ → B2",
+    targetBand: "5.5 – 6.5",
+    totalWeeks: 14,
+    curriculum: [
+      { weekNumber: 1, title: "IELTS Overview & Listening Part 1" },
+      { weekNumber: 2, title: "Reading Question Types & Skimming" },
+      { weekNumber: 3, title: "Writing Task 1: Line Graph & Bar Chart" },
+      { weekNumber: 4, title: "Speaking Part 1: Fluency & Pronunciation" },
+      { weekNumber: 5, title: "Listening Part 2: Map & Multiple Choice" },
+      { weekNumber: 6, title: "Reading: True/False/Not Given Mastery" },
+      {
+        weekNumber: 7,
+        title: "Paragraph Structure & Paraphrasing",
+        attachments: [
+          {
+            id: "att-if-01-w7-1",
+            name: "Slide-Bai-Giang-Tuan-7-Paragraph-Structure.pdf",
+            url: "/documents/sample-slide.pdf",
+            size: "2.4 MB",
+            sizeBytes: 2516582,
+            type: "SLIDE",
+            uploadedAt: "10/11/2026",
+            classCode: "IF-01",
+            weekNumber: 7,
+          },
+          {
+            id: "att-if-01-w7-2",
+            name: "Phieu-Bai-Tap-Paraphrasing-Practice-Task-1.docx",
+            url: "/documents/sample-worksheet.docx",
+            size: "1.1 MB",
+            sizeBytes: 1153433,
+            type: "DOCX",
+            uploadedAt: "10/11/2026",
+            classCode: "IF-01",
+            weekNumber: 7,
+          },
+        ],
+      },
+      { weekNumber: 8, title: "Writing Task 2: Opinion Essay" },
+      { weekNumber: 9, title: "Speaking Part 2: Long Turn & Cue Card Strategy" },
+      { weekNumber: 10, title: "Listening Part 3: Academic Discussion" },
+      { weekNumber: 11, title: "Reading: Matching Headings & Features" },
+      { weekNumber: 12, title: "Writing Task 2: Discussion Both Views" },
+      { weekNumber: 13, title: "Speaking Part 3: Abstract Ideas & Complex Structures" },
+      { weekNumber: 14, title: "Mock Test 4 Kỹ năng & Đánh giá đầu ra" },
+    ],
+  },
+  {
+    id: "preset-int-16w",
+    name: "IELTS Intensive (Band 6.5–7.5+) (16 tuần)",
+    level: "B2 → C1",
+    targetBand: "7.0 – 8.0",
+    totalWeeks: 16,
+    curriculum: [
+      {
+        weekNumber: 1,
+        title: "Advanced Lexical Resource & Collocations",
+        attachments: [
+          {
+            id: "att-ii-01-w1-1",
+            name: "Cambridge-18-Academic-Test-2-Collocations.pdf",
+            url: "/documents/cambridge-18.pdf",
+            size: "3.8 MB",
+            sizeBytes: 3984588,
+            type: "PDF",
+            uploadedAt: "08/11/2026",
+            classCode: "II-01",
+            weekNumber: 1,
+          },
+          {
+            id: "att-ii-01-w1-2",
+            name: "Bo-Flashcards-120-Academic-Collocations.docx",
+            url: "/documents/collocations-handout.docx",
+            size: "850 KB",
+            sizeBytes: 870400,
+            type: "DOCX",
+            uploadedAt: "08/11/2026",
+            classCode: "II-01",
+            weekNumber: 1,
+          },
+        ],
+      },
+      { weekNumber: 2, title: "Listening Part 1 & 2: Distractors & Speed Drill" },
+      { weekNumber: 3, title: "Reading: Speed Reading & Inference Questions" },
+      { weekNumber: 4, title: "Writing Task 1: Complex Mixed Charts & Process" },
+      { weekNumber: 5, title: "Speaking Part 1 & 2: Natural Idiomatic Phrasing" },
+      { weekNumber: 6, title: "Writing Task 2: Causes/Solutions & Two-part Question" },
+      { weekNumber: 7, title: "Listening Part 3: Academic Lecture & Multiple Speakers" },
+      { weekNumber: 8, title: "Reading: Complex Science & History Texts" },
+      {
+        weekNumber: 9,
+        title: "Argumentative Essay & Listening Part 3",
+        attachments: [
+          {
+            id: "att-ii-01-w9-1",
+            name: "Slide-Writing-Task-2-Counter-Argument.pdf",
+            url: "/documents/counter-argument-slide.pdf",
+            size: "4.2 MB",
+            sizeBytes: 4404019,
+            type: "SLIDE",
+            uploadedAt: "12/11/2026",
+            classCode: "II-01",
+            weekNumber: 9,
+          },
+        ],
+      },
+      { weekNumber: 10, title: "Writing Task 1: Map Comparison & Advanced Flow" },
+      { weekNumber: 11, title: "Speaking Part 3: Debate & Critical Stance" },
+      { weekNumber: 12, title: "Listening Part 4: Monologue & Note Completion" },
+      { weekNumber: 13, title: "Writing Task 2: High-band Counter-argument & Rebuttal" },
+      { weekNumber: 14, title: "Reading: Time Management under 55 mins" },
+      { weekNumber: 15, title: "Full Mock Exam & Intensive One-on-one Feedback" },
+      { weekNumber: 16, title: "Exam Psychology & Final Strategy Checklist" },
+    ],
+  },
+  {
+    id: "preset-writing-10w",
+    name: "Academic Writing & Critical Thinking (10 tuần)",
+    level: "B2 → C1",
+    targetBand: "Writing 7.0+",
+    totalWeeks: 10,
+    curriculum: [
+      { weekNumber: 1, title: "Academic Voice & Formality" },
+      { weekNumber: 2, title: "Sentence Structure & Cohesion Devices" },
+      { weekNumber: 3, title: "Paragraph Logic: Claim, Evidence, Analysis" },
+      { weekNumber: 4, title: "Data Commentary & Synthesizing Sources" },
+      { weekNumber: 5, title: "Writing with Critical Tone & Objectivity" },
+      { weekNumber: 6, title: "Research Synthesis & Hedging" },
+      { weekNumber: 7, title: "Argumentative Rhetoric & Avoiding Fallacies" },
+      { weekNumber: 8, title: "Literature Review Structure" },
+      { weekNumber: 9, title: "Peer Review Workshop & Advanced Editing" },
+      { weekNumber: 10, title: "Final Paper Presentation & Evaluation" },
+    ],
+  },
+  {
+    id: "preset-junior-12w",
+    name: "Junior Academic Explorers (12 tuần)",
+    level: "A2+ → B1",
+    targetBand: "Cambridge B1 Preliminary",
+    totalWeeks: 12,
+    curriculum: [
+      { weekNumber: 1, title: "Ice-breaker & Storytelling Fundamentals" },
+      { weekNumber: 2, title: "World Geography & Nature Vocabulary" },
+      { weekNumber: 3, title: "Animal Habitats & Simple Science Reading" },
+      { weekNumber: 4, title: "Creative Writing: My Imaginary Adventure" },
+      { weekNumber: 5, title: "Cambridge B1 Listening: Everyday Dialogues" },
+      { weekNumber: 6, title: "Pronunciation: Intonation & Linking Sounds" },
+      { weekNumber: 7, title: "Historical Heroes & Past Tense Narration" },
+      { weekNumber: 8, title: "Public Speaking & Science Reading" },
+      { weekNumber: 9, title: "Debate for Kids: Technology in School" },
+      { weekNumber: 10, title: "Writing an Informal Letter to a Penpal" },
+      { weekNumber: 11, title: "Cambridge B1 Mock Test Practice" },
+      { weekNumber: 12, title: "Project Showcase & Graduation Celebration" },
+    ],
+  },
+];
+
+// -----------------------------------------------------------------------------
 // 8. ADMIN CLASSES & STUDENT RECORDS (SERVER / AUTHENTICATED ONLY)
 // -----------------------------------------------------------------------------
 
@@ -1204,12 +1576,16 @@ export const CLASSROOMS_DATA: ClassroomGroup[] = [
     targetBand: "7.0 – 8.0",
     scheduleSummary: "Thứ 3 & Thứ 6 · 18:00 – 20:15",
     room: "Phòng 302",
-    enrolled: 12,
+    enrolled: 2,
     capacity: 12,
     attendanceRate: 96.5,
     averageScore: 7.4,
     currentModule: "Tuần 9/16 · Argumentative Essay & Listening Part 3",
     status: "active",
+    totalWeeks: 16,
+    currentWeekIndex: 9,
+    curriculum: CURRICULUM_PRESETS[2].curriculum,
+    tuitionDueDate: "2026-11-20",
   },
   {
     id: "cls-if-01",
@@ -1219,12 +1595,16 @@ export const CLASSROOMS_DATA: ClassroomGroup[] = [
     targetBand: "5.5 – 6.5",
     scheduleSummary: "Thứ 2 & Thứ 5 · 17:45 – 19:45",
     room: "Phòng 302",
-    enrolled: 14,
+    enrolled: 2,
     capacity: 15,
     attendanceRate: 94.2,
     averageScore: 6.1,
     currentModule: "Tuần 7/14 · Paragraph Structure & Paraphrasing",
     status: "active",
+    totalWeeks: 14,
+    currentWeekIndex: 7,
+    curriculum: CURRICULUM_PRESETS[1].curriculum,
+    tuitionDueDate: "2026-11-20",
   },
   {
     id: "cls-aw-02",
@@ -1234,12 +1614,16 @@ export const CLASSROOMS_DATA: ClassroomGroup[] = [
     targetBand: "Writing 7.0+",
     scheduleSummary: "Thứ 5 (19:50) & Thứ 7 (09:00)",
     room: "Phòng 302",
-    enrolled: 10,
+    enrolled: 1,
     capacity: 10,
     attendanceRate: 98.0,
     averageScore: 7.6,
     currentModule: "Tuần 6/10 · Research Synthesis & Hedging",
     status: "active",
+    totalWeeks: 10,
+    currentWeekIndex: 6,
+    curriculum: CURRICULUM_PRESETS[3].curriculum,
+    tuitionDueDate: "2026-11-20",
   },
   {
     id: "cls-ja-01",
@@ -1249,12 +1633,35 @@ export const CLASSROOMS_DATA: ClassroomGroup[] = [
     targetBand: "Cambridge B1 Preliminary",
     scheduleSummary: "Thứ 4 (17:30) & Chủ Nhật (08:30)",
     room: "Phòng 204",
-    enrolled: 15,
+    enrolled: 1,
     capacity: 16,
     attendanceRate: 95.0,
     averageScore: 8.2,
     currentModule: "Tuần 8/12 · Public Speaking & Science Reading",
     status: "active",
+    totalWeeks: 12,
+    currentWeekIndex: 8,
+    curriculum: CURRICULUM_PRESETS[4].curriculum,
+    tuitionDueDate: "2026-11-25",
+  },
+  {
+    id: "cls-mg-05",
+    code: "MG-05",
+    name: "Basic Level (Mất gốc - Lấy lại gốc cấp tốc)",
+    level: "A1 → A2 (Mất gốc)",
+    targetBand: "IELTS 3.0–3.5+",
+    scheduleSummary: "Thứ 2 (14:30 – 16:30) & Thứ 7 (19:50 – 21:30)",
+    room: "Phòng 302 · Cơ sở Nguyễn Du",
+    enrolled: 0,
+    capacity: 15,
+    attendanceRate: 100,
+    averageScore: 0,
+    currentModule: "Tuần 1/8 · Bảng phiên âm IPA & Chuẩn hóa phát âm",
+    status: "active",
+    totalWeeks: 8,
+    currentWeekIndex: 1,
+    curriculum: CURRICULUM_PRESETS[0].curriculum,
+    tuitionDueDate: "2026-11-20",
   },
 ];
 
@@ -1615,4 +2022,412 @@ export function authenticateStudentPortal(
     ADMIN_STUDENTS_DATA.find((student) => student.code.toUpperCase() === normalizedCode) ?? null
   );
 }
+
+// -----------------------------------------------------------------------------
+// 9. INITIAL CLASS SESSIONS, TEACHING JOURNALS & SESSION LEARNING HISTORY
+// -----------------------------------------------------------------------------
+
+export const CLASS_SESSIONS_DATA: ClassSessionRecord[] = [
+  {
+    id: "cs-2026-11-16-if01",
+    classId: "cls-if-01",
+    classCode: "IF-01",
+    className: "IELTS Foundation (Band 5.0–6.0)",
+    date: "2026-11-16",
+    dayLabel: "Thứ Hai",
+    startTime: "17:45",
+    endTime: "19:45",
+    room: "Phòng 204 · Cơ sở Nguyễn Du",
+    weekNumber: 7,
+    topic: "Reading – Matching Headings & Paraphrasing Core Ideas",
+    objectives:
+      "Nắm vững chiến thuật đọc lướt xác định Topic Sentence, tránh bẫy từ vựng lặp lại (word-spotting trap) và nâng tỷ lệ đúng dạng Matching Headings lên trên 75%.",
+    completionResult: "completed",
+    generalNotes:
+      "Lớp tham gia thảo luận tích cực phần phân tích từ đồng nghĩa. Tuy nhiên một số học viên còn mất nhiều thời gian ở đoạn văn trừu tượng về Môi trường.",
+    homework:
+      "Cambridge IELTS 17 – Test 2, Reading Passage 2 (câu 14–26) + Bảng Paraphrase 15 cụm từ học thuật.",
+    nextSessionPlan:
+      "Chữa chi tiết bài tập Passage 2 và chuyển sang kỹ thuật viết câu chủ đề (Topic Sentence) trong Writing Task 2.",
+    journalStatus: "completed",
+    attachments: [
+      {
+        id: "att-if01-1",
+        name: "Handout_Matching_Headings_Strategy.pdf",
+        type: "PDF",
+        size: "1.8 MB",
+      },
+      {
+        id: "att-if01-2",
+        name: "Slide_Paraphrasing_Patterns_Week7.pdf",
+        type: "SLIDE",
+        size: "3.2 MB",
+      },
+    ],
+    revisions: [
+      {
+        id: "rev-if01-1",
+        updatedAt: "16/11/2026 20:10",
+        summary: "Khởi tạo nhật ký sau buổi học và ghi nhận bài tập về nhà",
+        previousTopic: "Reading – Matching Headings",
+        previousNotes: "Đã dạy xong phần lý thuyết.",
+        previousCompletionResult: "partial",
+      },
+    ],
+    studentRecords: [
+      {
+        id: "ssr-if01-1611-stu03",
+        sessionId: "cs-2026-11-16-if01",
+        studentId: "stu-03",
+        studentCode: "HS-2026-03",
+        studentName: "Phạm Hà Phương",
+        attendance: "present",
+        homeworkStatus: "submitted",
+        learningStatus: "good",
+        skill: "Reading",
+        score: 7.0,
+        teacherFeedback:
+          "Đạt 8/10 câu đúng dạng Matching Headings. Xác định câu chủ đề đoạn văn nhanh và chính xác.",
+        followUp: "Duy trì tốc độ đọc 18 phút/passage.",
+      },
+      {
+        id: "ssr-if01-1611-stu06",
+        sessionId: "cs-2026-11-16-if01",
+        studentId: "stu-06",
+        studentCode: "HS-2026-06",
+        studentName: "Đặng Quốc Huy",
+        attendance: "present",
+        homeworkStatus: "not-submitted",
+        learningStatus: "needs-support",
+        skill: "Reading",
+        score: 5.5,
+        teacherFeedback:
+          "Có mặt đầy đủ nhưng chưa hoàn thành bài tập từ vựng về nhà. Đạt 5/10 câu do còn dịch từng từ.",
+        followUp: "Cần nộp bù bảng từ vựng trước thứ Năm và rèn kỹ năng đọc lấy ý chính.",
+      },
+    ],
+    updatedAt: "2026-11-16T20:15:00.000Z",
+  },
+  {
+    id: "cs-2026-11-14-ii01",
+    classId: "cls-ii-01",
+    classCode: "II-01",
+    className: "IELTS Intensive (Band 6.5–7.5+)",
+    date: "2026-11-14",
+    dayLabel: "Thứ Sáu",
+    startTime: "18:00",
+    endTime: "20:15",
+    room: "Phòng 302 · Cơ sở Nguyễn Du",
+    weekNumber: 9,
+    topic: "Writing Task 2 – Counter-Argument & Concession Paragraphs",
+    objectives:
+      "Xây dựng đoạn phản biện (Counter-argument) sắc bén cho đề bài Opinion/Discussion ở mức Band 7.5+, sử dụng mệnh đề nhượng bộ và hedging chuẩn học thuật.",
+    completionResult: "completed",
+    generalNotes:
+      "Học viên nắm rất tốt cấu trúc Concession. Bài viết thực hành tại lớp trong 25 phút đạt độ mạch lạc cao, cần chú ý thêm sự đa dạng của Collocations chủ đề Công nghệ.",
+    homework:
+      "Hoàn thiện bài luận 280 từ chủ đề AI in Higher Education và tự đánh giá theo Checklist Band 7.5.",
+    nextSessionPlan:
+      "Sửa bài chi tiết 1:1 cho từng học viên và luyện Listening Section 4 Note Completion.",
+    journalStatus: "completed",
+    attachments: [
+      {
+        id: "att-ii01-1",
+        name: "Writing_Task2_CounterArgument_Models_Band8.pdf",
+        type: "PDF",
+        size: "2.4 MB",
+      },
+    ],
+    revisions: [],
+    studentRecords: [
+      {
+        id: "ssr-ii01-1411-stu01",
+        sessionId: "cs-2026-11-14-ii01",
+        studentId: "stu-01",
+        studentCode: "HS-2026-01",
+        studentName: "Trần Bảo Ngọc",
+        attendance: "present",
+        homeworkStatus: "submitted",
+        learningStatus: "good",
+        skill: "Writing",
+        score: 8.0,
+        teacherFeedback:
+          "Hoàn thành bài viết xuất sắc, lập luận phản biện chặt chẽ và sử dụng từ nối học thuật tự nhiên.",
+        followUp: "Thử nghiệm thêm cấu trúc đảo ngữ nhẹ trong câu kết đoạn.",
+      },
+      {
+        id: "ssr-ii01-1411-stu04",
+        sessionId: "cs-2026-11-14-ii01",
+        studentId: "stu-04",
+        studentCode: "HS-2026-04",
+        studentName: "Nguyễn Đức Anh",
+        attendance: "present",
+        homeworkStatus: "submitted",
+        learningStatus: "satisfactory",
+        skill: "Writing",
+        score: 6.5,
+        teacherFeedback:
+          "Hoàn thành bài viết đúng thời gian nhưng còn yếu về cách phát triển luận điểm phụ ở đoạn Body 2.",
+        followUp: "Cần bổ sung ví dụ cụ thể (Specific Example) thay vì nêu nhận định chung chung.",
+      },
+    ],
+    updatedAt: "2026-11-14T20:40:00.000Z",
+  },
+  {
+    id: "cs-2026-11-13-ja01",
+    classId: "cls-ja-01",
+    classCode: "JA-01",
+    className: "Junior Academic Explorers",
+    date: "2026-11-13",
+    dayLabel: "Thứ Năm",
+    startTime: "17:45",
+    endTime: "19:30",
+    room: "Phòng 401 · Cơ sở Nguyễn Du",
+    weekNumber: 6,
+    topic: "Reading Club & Science Storytelling Presentation",
+    objectives:
+      "Rèn kỹ năng thuyết trình khoa học bằng tiếng Anh theo cấu trúc Hook – Problem – Discovery – Conclusion và phản biện câu hỏi từ bạn cùng lớp.",
+    completionResult: "completed",
+    generalNotes:
+      "Không khí lớp sôi nổi, học sinh tự tin đặt câu hỏi phản biện bằng tiếng Anh và sử dụng tốt ngữ điệu nhấn mạnh.",
+    homework:
+      "Thu âm đoạn Audio 2 phút tóm tắt bài thuyết trình đã chỉnh sửa.",
+    nextSessionPlan:
+      "Nghe phân tích podcast khoa học ngắn và mở rộng từ vựng chủ đề Renewable Energy.",
+    journalStatus: "completed",
+    attachments: [
+      {
+        id: "att-ja01-1",
+        name: "Science_Storytelling_Rubric_B1.pdf",
+        type: "WORKSHEET",
+        size: "1.1 MB",
+      },
+    ],
+    revisions: [],
+    studentRecords: [
+      {
+        id: "ssr-ja01-1311-stu05",
+        sessionId: "cs-2026-11-13-ja01",
+        studentId: "stu-05",
+        studentCode: "HS-2026-05",
+        studentName: "Vũ Thanh Trúc",
+        attendance: "present",
+        homeworkStatus: "submitted",
+        learningStatus: "good",
+        skill: "Speaking",
+        score: 9.0,
+        teacherFeedback:
+          "Thuyết trình mạch lạc, phát âm rõ ràng và trả lời câu hỏi phản biện rất thông minh.",
+        followUp: "Khuyến khích tham gia dự án thuyết trình mẫu của khóa.",
+      },
+    ],
+    updatedAt: "2026-11-13T20:00:00.000Z",
+  },
+  {
+    id: "cs-2026-11-12-if01",
+    classId: "cls-if-01",
+    classCode: "IF-01",
+    className: "IELTS Foundation (Band 5.0–6.0)",
+    date: "2026-11-12",
+    dayLabel: "Thứ Năm",
+    startTime: "17:45",
+    endTime: "19:45",
+    room: "Phòng 204 · Cơ sở Nguyễn Du",
+    weekNumber: 6,
+    topic: "Listening Section 3 – Academic Discussion & Distractors",
+    objectives:
+      "Nhận diện bẫy đổi ý (Self-correction distractors) trong cuộc thảo luận giữa sinh viên và giảng viên hướng dẫn.",
+    completionResult: "partial",
+    generalNotes:
+      "Đã hoàn thành 2 bài nghe mẫu Section 3. Phần phân tích transcript bài số 3 còn 10 phút cuối chưa kịp đi sâu nên chuyển sang đầu buổi tiếp theo.",
+    homework:
+      "Nghe chép chính tả (Dictation) đoạn hội thoại Section 3 trang 42 và gạch chân các từ nối chỉ sự đối lập.",
+    nextSessionPlan:
+      "Chữa nhanh 10 phút phần transcript còn lại trước khi học Reading Matching Headings.",
+    journalStatus: "completed",
+    attachments: [],
+    revisions: [],
+    studentRecords: [
+      {
+        id: "ssr-if01-1211-stu03",
+        sessionId: "cs-2026-11-12-if01",
+        studentId: "stu-03",
+        studentCode: "HS-2026-03",
+        studentName: "Phạm Hà Phương",
+        attendance: "present",
+        homeworkStatus: "submitted",
+        learningStatus: "good",
+        skill: "Listening",
+        score: 6.5,
+        teacherFeedback:
+          "Nghe bắt từ khóa tốt, nhận diện được 4/5 bẫy đổi thông tin của người nói.",
+        followUp: "Chú ý chính tả danh từ số nhiều ở phần điền từ.",
+      },
+      {
+        id: "ssr-if01-1211-stu06",
+        sessionId: "cs-2026-11-12-if01",
+        studentId: "stu-06",
+        studentCode: "HS-2026-06",
+        studentName: "Đặng Quốc Huy",
+        attendance: "absent",
+        homeworkStatus: "not-submitted",
+        learningStatus: "needs-support",
+        skill: "Listening",
+        score: null,
+        teacherFeedback:
+          "Vắng học không phép, chưa nộp bài tập về nhà buổi trước.",
+        followUp: "Liên hệ phụ huynh kiểm tra tình hình chuyên cần và gửi bản thu âm bài giảng.",
+      },
+    ],
+    updatedAt: "2026-11-12T20:10:00.000Z",
+  },
+  {
+    id: "cs-2026-11-11-ii01",
+    classId: "cls-ii-01",
+    classCode: "II-01",
+    className: "IELTS Intensive (Band 6.5–7.5+)",
+    date: "2026-11-11",
+    dayLabel: "Thứ Ba",
+    startTime: "18:00",
+    endTime: "20:15",
+    room: "Phòng 302 · Cơ sở Nguyễn Du",
+    weekNumber: 9,
+    topic: "Reading – Matching Information & Complex Inference",
+    objectives:
+      "Giải quyết dạng bài Matching Information kết hợp True/False/Not Given ở mức độ suy luận học thuật cao.",
+    completionResult: "completed",
+    generalNotes:
+      "Cả lớp hoàn thành full test Reading Passage 3 trong 20 phút với độ chính xác trên 85%.",
+    homework: "Phân tích 20 cấu trúc câu phức trong bài đọc Passage 3.",
+    nextSessionPlan: "Chuyển sang Writing Task 2 Counter-Argument.",
+    journalStatus: "completed",
+    attachments: [],
+    revisions: [],
+    studentRecords: [
+      {
+        id: "ssr-ii01-1111-stu01",
+        sessionId: "cs-2026-11-11-ii01",
+        studentId: "stu-01",
+        studentCode: "HS-2026-01",
+        studentName: "Trần Bảo Ngọc",
+        attendance: "present",
+        homeworkStatus: "submitted",
+        learningStatus: "good",
+        skill: "Reading",
+        score: 8.5,
+        teacherFeedback: "Đạt 13/14 câu Passage 3, tốc độ xử lý thông tin rất tốt.",
+        followUp: "Tiếp tục duy trì phong độ.",
+      },
+      {
+        id: "ssr-ii01-1111-stu04",
+        sessionId: "cs-2026-11-11-ii01",
+        studentId: "stu-04",
+        studentCode: "HS-2026-04",
+        studentName: "Nguyễn Đức Anh",
+        attendance: "present",
+        homeworkStatus: "submitted",
+        learningStatus: "good",
+        skill: "Reading",
+        score: 9.0,
+        teacherFeedback: "Tuyệt đối 14/14 câu đúng, kỹ năng skimming/scanning xuất sắc.",
+        followUp: "Dành thêm thời gian sang bổ trợ kỹ năng Writing & Speaking.",
+      },
+    ],
+    updatedAt: "2026-11-11T20:30:00.000Z",
+  },
+  {
+    id: "cs-2026-11-14-aw02",
+    classId: "cls-aw-02",
+    classCode: "AW-02",
+    className: "Academic Writing & Critical Thinking",
+    date: "2026-11-14",
+    dayLabel: "Thứ Bảy",
+    startTime: "09:00",
+    endTime: "11:00",
+    room: "Phòng 302 · Cơ sở Nguyễn Du",
+    weekNumber: 6,
+    topic: "Research Synthesis & Citation Ethics (APA 7th)",
+    objectives:
+      "Thực hành tổng hợp 3 nguồn tài liệu học thuật đối lập vào một đoạn Literature Synthesis mà không đạo văn.",
+    completionResult: "partial",
+    generalNotes:
+      "Bản nháp nhật ký: Đã hướng dẫn xong kỹ thuật Synthesis Matrix, đang chờ học viên nộp đoạn viết hoàn chỉnh cuối giờ.",
+    homework: "Viết đoạn Literature Review 350 từ trích dẫn tối thiểu 4 nguồn học thuật.",
+    nextSessionPlan: "Phản biện chéo (Peer Review) và sửa lỗi Nominalization.",
+    journalStatus: "draft",
+    attachments: [],
+    revisions: [],
+    studentRecords: [
+      {
+        id: "ssr-aw02-1411-stu02",
+        sessionId: "cs-2026-11-14-aw02",
+        studentId: "stu-02",
+        studentCode: "HS-2026-02",
+        studentName: "Lê Hoàng Minh Khôi",
+        attendance: "present",
+        homeworkStatus: "submitted",
+        learningStatus: "good",
+        skill: "Writing",
+        score: 8.0,
+        teacherFeedback: "Tổng hợp tài liệu sắc sảo, trích dẫn đúng chuẩn APA 7th.",
+        followUp: "Hoàn thiện phần Conclusion của bài tiểu luận.",
+      },
+    ],
+    updatedAt: "2026-11-14T11:15:00.000Z",
+  },
+  {
+    id: "cs-2026-11-17-ii01",
+    classId: "cls-ii-01",
+    classCode: "II-01",
+    className: "IELTS Intensive (Band 6.5–7.5+)",
+    date: "2026-11-17",
+    dayLabel: "Thứ Ba",
+    startTime: "18:00",
+    endTime: "20:15",
+    room: "Phòng 302 · Cơ sở Nguyễn Du",
+    weekNumber: 10,
+    topic: "Speaking Part 3 – Abstract Topics & Hedging Expressions",
+    objectives:
+      "Mở rộng câu trả lời Speaking Part 3 theo mô hình Point – Explanation – Speculation/Example với các cụm từ rào đón học thuật.",
+    completionResult: "not-completed",
+    generalNotes: "",
+    homework: "",
+    nextSessionPlan: "",
+    journalStatus: "not-started",
+    attachments: [],
+    revisions: [],
+    studentRecords: [
+      {
+        id: "ssr-ii01-1711-stu01",
+        sessionId: "cs-2026-11-17-ii01",
+        studentId: "stu-01",
+        studentCode: "HS-2026-01",
+        studentName: "Trần Bảo Ngọc",
+        attendance: "present",
+        homeworkStatus: "unrecorded",
+        learningStatus: "unrecorded",
+        skill: "Speaking",
+        score: null,
+        teacherFeedback: "",
+        followUp: "",
+      },
+      {
+        id: "ssr-ii01-1711-stu04",
+        sessionId: "cs-2026-11-17-ii01",
+        studentId: "stu-04",
+        studentCode: "HS-2026-04",
+        studentName: "Nguyễn Đức Anh",
+        attendance: "present",
+        homeworkStatus: "unrecorded",
+        learningStatus: "unrecorded",
+        skill: "Speaking",
+        score: null,
+        teacherFeedback: "",
+        followUp: "",
+      },
+    ],
+    updatedAt: "2026-11-17T08:00:00.000Z",
+  },
+];
+
 

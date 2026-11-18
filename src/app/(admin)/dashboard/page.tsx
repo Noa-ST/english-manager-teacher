@@ -34,14 +34,23 @@ import { ModalDialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 
+function mergeClassesWithDefaults(cached: ClassroomGroup[]): ClassroomGroup[] {
+  const map = new Map<string, ClassroomGroup>();
+  for (const c of CLASSROOMS_DATA) {
+    map.set(c.id, c);
+  }
+  for (const c of cached) {
+    map.set(c.id, c);
+  }
+  return Array.from(map.values());
+}
+
 export default function AdminDashboardPage() {
   const { toast } = useToast();
 
-  const [classes, setClasses] =
-    React.useState<ClassroomGroup[]>(CLASSROOMS_DATA);
-  const [sessions, setSessions] = React.useState<WeeklyClassSession[]>(
-    WEEKLY_SCHEDULE_DATA,
-  );
+  const [classes, setClasses] = React.useState<ClassroomGroup[]>(CLASSROOMS_DATA);
+  const [sessions, setSessions] = React.useState<WeeklyClassSession[]>(WEEKLY_SCHEDULE_DATA);
+
   const [students, setStudents] = React.useState<AdminStudentRecord[]>(
     ADMIN_STUDENTS_DATA,
   );
@@ -53,7 +62,7 @@ export default function AdminDashboardPage() {
   // Quick student form
   const [newStudentName, setNewStudentName] = React.useState("");
   const [newStudentClass, setNewStudentClass] = React.useState(
-    CLASSROOMS_DATA[0]?.name ?? "",
+    () => classes[0]?.name ?? "",
   );
   const [newStudentGoal, setNewStudentGoal] = React.useState("IELTS 7.0 Overall");
 
@@ -69,9 +78,26 @@ export default function AdminDashboardPage() {
       announcements: AnnouncementItem[];
     }>("/api/admin/dashboard")
       .then((res) => {
-        setClasses(res.classes);
-        setSessions(res.sessions);
-        setStudents(res.students);
+        if (res.classes && res.classes.length > 0) {
+          const merged = mergeClassesWithDefaults(res.classes);
+          setClasses(merged);
+          if (typeof window !== "undefined") {
+            try {
+              localStorage.setItem("teacher_studio_classrooms_v1", JSON.stringify(merged));
+            } catch {}
+          }
+        }
+        if (res.sessions && res.sessions.length > 0) {
+          setSessions(res.sessions);
+          if (typeof window !== "undefined") {
+            try {
+              localStorage.setItem("teacher_studio_schedule_v1", JSON.stringify(res.sessions));
+            } catch {}
+          }
+        }
+        if (res.students && res.students.length > 0) {
+          setStudents(res.students);
+        }
       })
       .catch(() => {});
   }, []);

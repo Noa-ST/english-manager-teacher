@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useSearchParams } from "next/navigation";
 import {
   CheckCheck,
   CheckCircle2,
@@ -14,10 +15,14 @@ import {
   ADMIN_STUDENTS_DATA,
   CLASSROOMS_DATA,
   WEEKLY_SCHEDULE_DATA,
+  type AdminStudentRecord,
+  type ClassroomGroup,
+  type WeeklyClassSession,
 } from "@/services/classroom-data";
 import { apiRequest } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PaginationBar } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
@@ -59,16 +64,42 @@ const STATUS_OPTIONS: {
   },
 ];
 
+function mergeClassesWithDefaults(cached: ClassroomGroup[]): ClassroomGroup[] {
+  const map = new Map<string, ClassroomGroup>();
+  for (const c of CLASSROOMS_DATA) {
+    map.set(c.id, c);
+  }
+  for (const c of cached) {
+    map.set(c.id, c);
+  }
+  return Array.from(map.values());
+}
+
 export default function AdminAttendancePage() {
   const { toast } = useToast();
-  const [selectedClassId, setSelectedClassId] = React.useState<string>("all");
+  const searchParams = useSearchParams();
+  const initialClassId = searchParams.get("classId") ?? "all";
+  const [selectedClassId, setSelectedClassId] = React.useState<string>(initialClassId);
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(10);
+
+  const [classes, setClasses] = React.useState<ClassroomGroup[]>(CLASSROOMS_DATA);
+  const [sessions, setSessions] = React.useState<WeeklyClassSession[]>(WEEKLY_SCHEDULE_DATA);
+
   const [selectedSessionId, setSelectedSessionId] = React.useState<string>(
-    WEEKLY_SCHEDULE_DATA[0]?.id ?? "ses-mon-1",
+    () => sessions[0]?.id ?? "ses-mon-1",
   );
-  const [sessionDate, setSessionDate] = React.useState("2026-11-12");
+  const [sessionDate, setSessionDate] = React.useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  });
+
+  const [activeStudents, setActiveStudents] = React.useState<AdminStudentRecord[]>(() =>
+    ADMIN_STUDENTS_DATA.filter((s) => s.status !== "archived"),
+  );
 
   const [roster, setRoster] = React.useState<StudentAttendanceEntry[]>(() =>
-    ADMIN_STUDENTS_DATA.map((stu, idx) => ({
+    ADMIN_STUDENTS_DATA.filter((s) => s.status !== "archived").map((stu, idx) => ({
       studentId: stu.id,
       code: stu.code,
       fullName: stu.fullName,
@@ -82,15 +113,79 @@ export default function AdminAttendancePage() {
     })),
   );
 
+  React.useEffect(() => {
+    apiRequest<ClassroomGroup[]>("/api/admin/classes")
+      .then((items) => {
+        if (items && items.length > 0) {
+          const merged = mergeClassesWithDefaults(items);
+          setClasses(merged);
+          if (typeof window !== "undefined") {
+            try {
+              localStorage.setItem("teacher_studio_classrooms_v1", JSON.stringify(merged));
+            } catch {}
+          }
+        }
+      })
+      .catch(() => {});
+
+    apiRequest<WeeklyClassSession[]>("/api/admin/schedule")
+      .then((items) => {
+        if (items && items.length > 0) {
+          setSessions(items);
+          if (typeof window !== "undefined") {
+            try {
+              localStorage.setItem("teacher_studio_schedule_v1", JSON.stringify(items));
+            } catch {}
+          }
+        }
+      })
+      .catch(() => {});
+
+    apiRequest<AdminStudentRecord[]>("/api/admin/students?status=active&pageSize=100")
+      .then((items) => {
+        if (items.length > 0) {
+          setActiveStudents(items);
+          setRoster((prev) => {
+            const prevMap = new Map(prev.map((r) => [r.studentId, r]));
+            return items.map((stu) => {
+              const existing = prevMap.get(stu.id);
+              if (existing) {
+                return {
+                  ...existing,
+                  code: stu.code,
+                  fullName: stu.fullName,
+                };
+              }
+              return {
+                studentId: stu.id,
+                code: stu.code,
+                fullName: stu.fullName,
+                status: "present",
+                note: "",
+              };
+            });
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   const visibleRoster = React.useMemo(() => {
     if (selectedClassId === "all") return roster;
     const allowedIds = new Set(
-      ADMIN_STUDENTS_DATA.filter((s) => s.classId === selectedClassId).map(
-        (s) => s.id,
-      ),
+      activeStudents
+        .filter((s) => s.classId === selectedClassId)
+        .map((s) => s.id),
     );
     return roster.filter((r) => allowedIds.has(r.studentId));
-  }, [roster, selectedClassId]);
+  }, [roster, selectedClassId, activeStudents]);
+
+  const totalPages = Math.max(1, Math.ceil(visibleRoster.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const paginatedRoster = visibleRoster.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize,
+  );
 
   const stats = React.useMemo(() => {
     const total = visibleRoster.length || 1;
@@ -202,11 +297,14 @@ export default function AdminAttendancePage() {
           <select
             id="att-class-select"
             value={selectedClassId}
-            onChange={(e) => setSelectedClassId(e.target.value)}
+            onChange={(e) => {
+              setSelectedClassId(e.target.value);
+              setPage(1);
+            }}
             className="h-9 w-full rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
           >
             <option value="all">Tất cả học viên ({roster.length} HV)</option>
-            {CLASSROOMS_DATA.map((cls) => (
+            {classes.map((cls) => (
               <option key={cls.id} value={cls.id}>
                 {cls.code} — {cls.name}
               </option>
@@ -224,10 +322,13 @@ export default function AdminAttendancePage() {
           <select
             id="att-session-select"
             value={selectedSessionId}
-            onChange={(e) => setSelectedSessionId(e.target.value)}
+            onChange={(e) => {
+              setSelectedSessionId(e.target.value);
+              setPage(1);
+            }}
             className="h-9 w-full rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
           >
-            {WEEKLY_SCHEDULE_DATA.map((ses) => (
+            {sessions.map((ses) => (
               <option key={ses.id} value={ses.id}>
                 {ses.dayLabel} ({ses.startTime}–{ses.endTime}) · {ses.classCode}
               </option>
@@ -246,7 +347,10 @@ export default function AdminAttendancePage() {
             id="att-date-input"
             type="date"
             value={sessionDate}
-            onChange={(e) => setSessionDate(e.target.value)}
+            onChange={(e) => {
+              setSessionDate(e.target.value);
+              setPage(1);
+            }}
             className="h-9"
           />
         </div>
@@ -310,75 +414,93 @@ export default function AdminAttendancePage() {
         </div>
 
         <div className="divide-y divide-border">
-          {visibleRoster.map((entry, idx) => (
-            <div
-              key={entry.studentId}
-              className="flex flex-col justify-between gap-4 p-4 transition-colors hover:bg-muted/20 lg:flex-row lg:items-center"
-            >
-              {/* Student Identity */}
-              <div className="flex items-center gap-3.5 min-w-64">
-                <span className="w-6 font-mono text-xs text-muted-foreground">
-                  {String(idx + 1).padStart(2, "0")}
-                </span>
-                <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-warm font-heading text-xs font-bold text-primary">
-                  {entry.fullName
-                    .split(" ")
-                    .slice(-2)
-                    .map((w) => w[0])
-                    .join("")}
-                </div>
-                <div>
-                  <p className="font-heading text-sm font-bold text-foreground">
-                    {entry.fullName}
-                  </p>
-                  <p className="font-mono text-xs text-muted-foreground">
-                    {entry.code}
-                  </p>
-                </div>
-              </div>
-
-              {/* 1-Click Segmented Status Buttons */}
+          {paginatedRoster.map((entry, idx) => {
+            const actualIndex = (currentPage - 1) * pageSize + idx + 1;
+            return (
               <div
-                className="flex flex-wrap items-center gap-1.5"
-                role="radiogroup"
-                aria-label={`Trạng thái điểm danh của ${entry.fullName}`}
+                key={entry.studentId}
+                className="flex flex-col justify-between gap-4 p-4 transition-colors hover:bg-muted/20 lg:flex-row lg:items-center"
               >
-                {STATUS_OPTIONS.map((opt) => {
-                  const active = entry.status === opt.value;
-                  return (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      role="radio"
-                      aria-checked={active}
-                      onClick={() => handleSetStatus(entry.studentId, opt.value)}
-                      className={cn(
-                        "rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all",
-                        active
-                          ? opt.activeClass
-                          : "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
-                      )}
-                    >
-                      {opt.label}
-                    </button>
-                  );
-                })}
-              </div>
+                {/* Student Identity */}
+                <div className="flex items-center gap-3.5 min-w-64">
+                  <span className="w-6 font-mono text-xs text-muted-foreground">
+                    {String(actualIndex).padStart(2, "0")}
+                  </span>
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-warm font-heading text-xs font-bold text-primary">
+                    {entry.fullName
+                      .split(" ")
+                      .slice(-2)
+                      .map((w) => w[0])
+                      .join("")}
+                  </div>
+                  <div>
+                    <p className="font-heading text-sm font-bold text-foreground">
+                      {entry.fullName}
+                    </p>
+                    <p className="font-mono text-xs text-muted-foreground">
+                      {entry.code}
+                    </p>
+                  </div>
+                </div>
 
-              {/* Inline Note */}
-              <div className="w-full lg:w-72">
-                <Input
-                  type="text"
-                  value={entry.note}
-                  onChange={(e) => handleSetNote(entry.studentId, e.target.value)}
-                  placeholder="Ghi chú lý do vắng / muộn / bài bù..."
-                  aria-label={`Ghi chú điểm danh cho ${entry.fullName}`}
-                  className="h-8 text-xs"
-                />
+                {/* 1-Click Segmented Status Buttons */}
+                <div
+                  className="flex flex-wrap items-center gap-1.5"
+                  role="radiogroup"
+                  aria-label={`Trạng thái điểm danh của ${entry.fullName}`}
+                >
+                  {STATUS_OPTIONS.map((opt) => {
+                    const active = entry.status === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        onClick={() => handleSetStatus(entry.studentId, opt.value)}
+                        className={cn(
+                          "rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all",
+                          active
+                            ? opt.activeClass
+                            : "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Inline Note */}
+                <div className="w-full lg:w-72">
+                  <Input
+                    type="text"
+                    value={entry.note}
+                    onChange={(e) => handleSetNote(entry.studentId, e.target.value)}
+                    placeholder="Ghi chú lý do vắng / muộn / bài bù..."
+                    aria-label={`Ghi chú điểm danh cho ${entry.fullName}`}
+                    className="h-8 text-xs"
+                  />
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
+
+        {visibleRoster.length > 0 && (
+          <PaginationBar
+            page={currentPage}
+            totalPages={totalPages}
+            totalItems={visibleRoster.length}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={(sz) => {
+              setPageSize(sz);
+              setPage(1);
+            }}
+            pageSizeOptions={[10, 20, 50]}
+          />
+        )}
 
         <div className="flex items-center justify-between border-t border-border bg-muted/20 px-5 py-3.5">
           <span className="text-xs text-muted-foreground">

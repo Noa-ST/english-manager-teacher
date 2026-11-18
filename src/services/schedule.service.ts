@@ -2,7 +2,10 @@ import { z } from "zod";
 
 import type { WeeklyClassSession } from "./classroom-data";
 import { idSchema, validate } from "./common";
-import { getRuntimeStore } from "./runtime-store";
+import { getRuntimeStore, saveRuntimeStore } from "./runtime-store";
+import { formatSessionsToScheduleSummary, isTimeOverlapping } from "./schedule-helper";
+import { syncClassroomMetrics } from "./student.service";
+import { recalculateStudentAttendanceRate } from "./teaching-journal.service";
 
 /**
  * Schedule service — teaching sessions (Ca học), enrolment and quick
@@ -78,10 +81,14 @@ export async function listWeeklySchedule(
 ): Promise<WeeklyClassSession[]> {
   const query = validate(weekQuerySchema, input ?? {});
   const store = getRuntimeStore();
+  const sortedSessions = [...store.sessions].sort((a, b) => {
+    if (a.dayOfWeek !== b.dayOfWeek) return a.dayOfWeek - b.dayOfWeek;
+    return a.startTime.localeCompare(b.startTime);
+  });
   if (!query.dayOfWeek || query.dayOfWeek === 0) {
-    return store.sessions;
+    return sortedSessions;
   }
-  return store.sessions.filter((s) => s.dayOfWeek === query.dayOfWeek);
+  return sortedSessions.filter((s) => s.dayOfWeek === query.dayOfWeek);
 }
 
 export async function createClassSession(
@@ -95,7 +102,10 @@ export async function createClassSession(
     store.classrooms[0];
 
   const hasConflict = store.sessions.some(
-    (s) => s.dayOfWeek === data.dayOfWeek && s.startTime === data.startTime,
+    (s) =>
+      s.dayOfWeek === data.dayOfWeek &&
+      (s.startTime === data.startTime ||
+        isTimeOverlapping(s.startTime, s.endTime, data.startTime, data.endTime)),
   );
 
   const newSession: WeeklyClassSession = {
@@ -116,7 +126,40 @@ export async function createClassSession(
   };
 
   store.sessions.push(newSession);
+
+  // Auto-sort store.sessions chronologically: by dayOfWeek (1..7), then startTime
+  store.sessions.sort((a, b) => {
+    if (a.dayOfWeek !== b.dayOfWeek) return a.dayOfWeek - b.dayOfWeek;
+    return a.startTime.localeCompare(b.startTime);
+  });
+
+  // Synchronize classroom scheduleSummary in store.classrooms
+  if (targetClass) {
+    const classSessions = store.sessions.filter(
+      (s) => s.classCode === targetClass.code,
+    );
+    targetClass.scheduleSummary = formatSessionsToScheduleSummary(classSessions);
+  }
+
+  saveRuntimeStore(store);
   return newSession;
+}
+
+export async function deleteClassSession(id: string): Promise<boolean> {
+  const store = getRuntimeStore();
+  const idx = store.sessions.findIndex((s) => s.id === id);
+  if (idx === -1) return false;
+
+  const [removed] = store.sessions.splice(idx, 1);
+  const targetClass = store.classrooms.find((c) => c.code === removed.classCode);
+  if (targetClass) {
+    const classSessions = store.sessions.filter(
+      (s) => s.classCode === targetClass.code,
+    );
+    targetClass.scheduleSummary = formatSessionsToScheduleSummary(classSessions);
+  }
+  saveRuntimeStore(store);
+  return true;
 }
 
 export async function enrollStudents(input: unknown): Promise<void> {
@@ -138,7 +181,11 @@ export async function recordAttendance(input: unknown): Promise<{
     : "Buổi học định kỳ";
 
   for (const entry of data.entries) {
-    const stu = store.students.find((s) => s.id === entry.studentId);
+    const stu = store.students.find(
+      (s) =>
+        s.id === entry.studentId ||
+        s.code.toLowerCase() === entry.studentId.toLowerCase(),
+    );
     if (!stu) continue;
 
     const existingIdx = stu.attendanceHistory.findIndex(
@@ -157,12 +204,31 @@ export async function recordAttendance(input: unknown): Promise<{
       stu.attendanceHistory.unshift(record);
     }
 
-    const total = stu.attendanceHistory.length || 1;
-    const attended = stu.attendanceHistory.filter(
-      (a) => a.status === "present" || a.status === "late",
-    ).length;
-    stu.attendanceRate = Math.round((attended / total) * 100);
+    recalculateStudentAttendanceRate(stu);
+
+    // Sync with central ClassSessionRecord if one exists for this sessionId or date + class
+    const matchingClassSession = store.classSessions.find(
+      (cs) =>
+        cs.id === data.sessionId ||
+        (cs.date === data.date && cs.classId === stu.classId),
+    );
+    if (matchingClassSession) {
+      const ssr = matchingClassSession.studentRecords.find(
+        (r) =>
+          r.studentId === stu.id ||
+          r.studentCode.toLowerCase() === stu.code.toLowerCase(),
+      );
+      if (ssr) {
+        ssr.attendance = entry.status;
+        if (entry.note && !ssr.teacherFeedback) {
+          ssr.teacherFeedback = entry.note;
+        }
+      }
+    }
   }
+
+  syncClassroomMetrics(store);
+  saveRuntimeStore(store);
 
   const totalEntries = data.entries.length || 1;
   const presentOrLate = data.entries.filter(

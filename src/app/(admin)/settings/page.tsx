@@ -363,7 +363,7 @@ export default function AdminSettingsPage() {
                   </p>
                 </div>
               </div>
-              <Badge variant="success">Active</Badge>
+              <Badge variant="success">Đang hoạt động</Badge>
             </div>
 
             <div className="mt-4 space-y-3 text-xs">

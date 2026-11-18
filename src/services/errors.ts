@@ -50,6 +50,12 @@ export class ConflictError extends DomainError {
   }
 }
 
+export class TooManyRequestsError extends DomainError {
+  constructor(message = "Bạn đã thực hiện quá nhiều yêu cầu. Vui lòng thử lại sau.") {
+    super("TOO_MANY_REQUESTS", message);
+  }
+}
+
 /** Placeholder for scaffolded operations awaiting implementation. */
 export class NotImplementedError extends DomainError {
   constructor(operation: string) {

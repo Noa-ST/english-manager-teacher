@@ -19,7 +19,28 @@ export const GET = adminRoute(async (request) => {
 });
 
 export const POST = adminRoute(async (request) => {
-  const student = await studentService.createStudent(await readJson(request));
+  const body = await readJson(request);
+  if (body && typeof body === "object") {
+    if ("action" in body) {
+      if (body.action === "batch-archive") {
+        const result = await studentService.batchArchiveStudents(body);
+        return ok(result);
+      }
+      if (body.action === "batch-restore") {
+        const result = await studentService.batchRestoreStudents(body);
+        return ok(result);
+      }
+      if (body.action === "batch-create") {
+        const result = await studentService.batchCreateStudents(body);
+        return ok(result, { status: 201 });
+      }
+    }
+    if (Array.isArray(body)) {
+      const result = await studentService.batchCreateStudents(body);
+      return ok(result, { status: 201 });
+    }
+  }
+  const student = await studentService.createStudent(body);
   return ok(student, { status: 201 });
 });
 

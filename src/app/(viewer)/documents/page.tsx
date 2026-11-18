@@ -41,15 +41,23 @@ import {
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 
+export const FILE_TYPE_LABELS: Record<ResourceFileItem["fileType"], string> = {
+  PDF: "Tài liệu PDF",
+  SLIDE: "Slide bài giảng",
+  WORKSHEET: "Phiếu bài tập (Worksheet)",
+  AUDIO: "Băng nghe (Audio Listening)",
+  IMAGE: "Hình ảnh",
+};
+
 const FILE_TYPE_FILTERS: {
   value: "all" | ResourceFileItem["fileType"];
   label: string;
 }[] = [
   { value: "all", label: "Tất cả định dạng" },
-  { value: "PDF", label: "PDF" },
-  { value: "WORKSHEET", label: "Worksheet" },
+  { value: "PDF", label: "Tài liệu PDF" },
+  { value: "WORKSHEET", label: "Phiếu bài tập (Worksheet)" },
   { value: "SLIDE", label: "Slide bài giảng" },
-  { value: "AUDIO", label: "Audio Listening" },
+  { value: "AUDIO", label: "Băng nghe (Audio Listening)" },
 ];
 
 export default function DocumentsPage() {
@@ -363,7 +371,9 @@ export default function DocumentsPage() {
                     <div className="flex size-9 items-center justify-center rounded-xl bg-warm">
                       {getFileIcon(file.fileType)}
                     </div>
-                    <Badge variant="outline">{file.fileType}</Badge>
+                    <Badge variant="outline">
+                      {FILE_TYPE_LABELS[file.fileType] || file.fileType}
+                    </Badge>
                   </div>
                   <Badge variant="secondary">{file.level}</Badge>
                 </div>
@@ -432,7 +442,7 @@ export default function DocumentsPage() {
                         {file.title}
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        {file.fileType} · {file.pagesOrDuration}
+                        {FILE_TYPE_LABELS[file.fileType] || file.fileType} · {file.pagesOrDuration}
                       </p>
                     </div>
                   </div>
@@ -510,7 +520,7 @@ export default function DocumentsPage() {
         title={previewFile?.title ?? "Xem trước tài liệu"}
         description={
           previewFile
-            ? `${previewFile.folderName} · ${previewFile.fileType} (${previewFile.size})`
+            ? `${previewFile.folderName} · ${FILE_TYPE_LABELS[previewFile.fileType] || previewFile.fileType} (${previewFile.size})`
             : undefined
         }
         size="md"

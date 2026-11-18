@@ -553,7 +553,7 @@ function LoginFormContent() {
                             onClick={() => void handleQuickLogin("admin")}
                             className="rounded-lg border border-[#D8DFEC] bg-white px-2.5 py-1.5 text-left font-medium text-[#1E3458] shadow-2xs transition-colors hover:border-[#1E3458] hover:bg-[#F5F7FB]"
                           >
-                            <p className="font-semibold text-[11px]">Giáo viên (ADMIN)</p>
+                            <p className="font-semibold text-[11px]">Giáo viên / Quản trị viên</p>
                             <p className="text-[10px] text-[#7B8497] truncate">
                               teacher@example.com
                             </p>
@@ -564,7 +564,7 @@ function LoginFormContent() {
                             onClick={() => void handleQuickLogin("student")}
                             className="rounded-lg border border-[#D8DFEC] bg-white px-2.5 py-1.5 text-left font-medium text-[#1E3458] shadow-2xs transition-colors hover:border-[#1E3458] hover:bg-[#F5F7FB]"
                           >
-                            <p className="font-semibold text-[11px]">Học sinh (STUDENT)</p>
+                            <p className="font-semibold text-[11px]">Học sinh / Cổng học vụ</p>
                             <p className="text-[10px] text-[#7B8497] truncate">
                               student1@example.com
                             </p>

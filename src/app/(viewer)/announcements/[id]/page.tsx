@@ -170,7 +170,7 @@ function AnnouncementDetailContent({
                     <div className="min-w-0">
                       <p className="truncate text-xs font-semibold text-foreground">{att.name}</p>
                       <p className="text-[11px] text-muted-foreground">
-                        {att.type} · {att.size} · {att.downloadCount} lượt tải
+                        {att.type.toUpperCase()} · {att.size} · {att.downloadCount} lượt tải
                       </p>
                     </div>
                   </div>

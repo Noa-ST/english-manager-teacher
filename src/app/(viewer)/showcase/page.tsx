@@ -26,15 +26,22 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 
+export const PROJECT_CATEGORY_LABELS: Record<string, string> = {
+  "Research Poster": "Poster Nghiên Cứu",
+  "Debate Portfolio": "Hồ Sơ Tranh Biện",
+  "Video Presentation": "Video Thuyết Trình",
+  "Academic Essay": "Bài Luận Học Thuật",
+};
+
 const PROJECT_CATEGORIES: {
   value: "all" | StudentProjectItem["category"];
   label: string;
 }[] = [
   { value: "all", label: "Tất cả thể loại" },
-  { value: "Research Poster", label: "Research Poster" },
-  { value: "Debate Portfolio", label: "Debate Portfolio" },
-  { value: "Video Presentation", label: "Video Presentation" },
-  { value: "Academic Essay", label: "Academic Essay" },
+  { value: "Research Poster", label: "Poster Nghiên Cứu" },
+  { value: "Debate Portfolio", label: "Hồ Sơ Tranh Biện" },
+  { value: "Video Presentation", label: "Video Thuyết Trình" },
+  { value: "Academic Essay", label: "Bài Luận Học Thuật" },
 ];
 
 export default function ShowcasePage() {
@@ -213,7 +220,10 @@ export default function ShowcasePage() {
                 >
                   <div className="flex items-center gap-2 text-xs font-semibold">
                     <Layers className="size-4" aria-hidden="true" />
-                    <span>{project.category}</span>
+                    <span>
+                      {PROJECT_CATEGORY_LABELS[project.category] ||
+                        project.category}
+                    </span>
                   </div>
                   <span className="rounded-full bg-black/15 px-2.5 py-0.5 font-mono text-[11px] font-semibold">
                     {project.featuredMetric}
@@ -290,7 +300,7 @@ export default function ShowcasePage() {
         title={previewProject?.title ?? "Chi tiết dự án học sinh"}
         description={
           previewProject
-            ? `${previewProject.category} · Thực hiện: ${previewProject.studentOrTeam}`
+            ? `${PROJECT_CATEGORY_LABELS[previewProject.category] || previewProject.category} · Thực hiện: ${previewProject.studentOrTeam}`
             : undefined
         }
         size="lg"

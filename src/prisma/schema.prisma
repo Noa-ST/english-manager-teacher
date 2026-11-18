@@ -225,6 +225,8 @@ model Student {
   updatedAt           DateTime           @updatedAt
   grades              GradeRecord[]
   attendanceHistory   AttendanceRecord[]
+  classTransfers      ClassTransferHistory[]
+  gradeChangeHistory  GradeChangeHistory[]
 
   @@index([classroomId])
   @@index([tuitionStatus])
@@ -243,7 +245,8 @@ model GradeRecord {
   speaking        Float
   overall         Float
   comment         String
-  createdAt       DateTime @default(now())
+  createdAt       DateTime             @default(now())
+  history         GradeChangeHistory[]
 
   @@index([studentId])
   @@index([assessmentTitle])
@@ -262,6 +265,56 @@ model AttendanceRecord {
   createdAt   DateTime         @default(now())
 
   @@index([studentId, date])
+}
+
+// -----------------------------------------------------------------------------
+//  3b. AUDIT TRAIL & RATE LIMITING
+// -----------------------------------------------------------------------------
+
+model ClassTransferHistory {
+  id         String    @id @default(cuid())
+  studentId  String
+  student    Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  oldClassId String
+  newClassId String
+  changedBy  String    @default("admin")
+  changedAt  DateTime  @default(now())
+  reason     String?
+
+  @@index([studentId])
+  @@index([changedAt])
+}
+
+model GradeChangeHistory {
+  id              String       @id @default(cuid())
+  studentId       String
+  student         Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  gradeRecordId   String?
+  gradeRecord     GradeRecord? @relation(fields: [gradeRecordId], references: [id], onDelete: SetNull)
+  assessmentTitle String
+  oldScore        Float
+  newScore        Float
+  changedBy       String       @default("admin")
+  changedAt       DateTime     @default(now())
+  reason          String?
+
+  @@index([studentId])
+  @@index([gradeRecordId])
+  @@index([changedAt])
+}
+
+model AuthRateLimit {
+  id             String    @id @default(cuid())
+  identifier     String    @unique
+  failedAttempts Int       @default(1)
+  firstFailedAt  DateTime  @default(now())
+  lastFailedAt   DateTime  @default(now())
+  lockedUntil    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([identifier])
+  @@index([lockedUntil])
 }
 
 // -----------------------------------------------------------------------------

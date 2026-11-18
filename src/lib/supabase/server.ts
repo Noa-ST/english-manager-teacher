@@ -1,8 +1,11 @@
-import { createServerClient } from "@supabase/ssr";
+import * as ssr from "@supabase/ssr";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
 import { getServerEnv } from "@/lib/env";
+
+const createServerClient =
+  ssr.createServerClient ?? (ssr as unknown as { default: { createServerClient: typeof ssr.createServerClient } }).default?.createServerClient;
 
 /**
  * Server-side Supabase SSR client (Cookie-based session, anon/publishable key).

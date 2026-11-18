@@ -43,6 +43,21 @@ import { useToast } from "@/components/ui/toast";
 import { AudioPlayer } from "@/components/viewer/audio-player";
 import { cn } from "@/lib/utils";
 
+const PROJECT_CATEGORY_LABELS: Record<string, string> = {
+  "Research Poster": "Poster Nghiên cứu",
+  "Debate Portfolio": "Hồ sơ Tranh biện",
+  "Video Presentation": "Video Thuyết trình",
+  "Academic Essay": "Bài luận Học thuật",
+};
+
+const FILE_TYPE_LABELS: Record<string, string> = {
+  PDF: "Tài liệu PDF",
+  SLIDE: "Slide bài giảng",
+  WORKSHEET: "Phiếu bài tập",
+  AUDIO: "Băng nghe (Audio)",
+  IMAGE: "Hình ảnh",
+};
+
 const SCHEDULE_DAYS = [
   { value: 1, shortLabel: "Th 2", subLabel: "T2", dayName: "Thứ Hai" },
   { value: 2, shortLabel: "Th 3", subLabel: "T3", dayName: "Thứ Ba" },
@@ -1006,7 +1021,8 @@ export default function ViewerHomePage() {
                       )}
                     >
                       <span className="self-start rounded-md bg-white/90 px-2 py-0.5 text-[10px] font-bold text-[#243B64] shadow-2xs">
-                        {project.category}
+                        {PROJECT_CATEGORY_LABELS[project.category] ||
+                          project.category}
                       </span>
 
                       {idx === 0 ? (
@@ -1091,7 +1107,8 @@ export default function ViewerHomePage() {
                           {doc.title}
                         </h3>
                         <p className="mt-0.5 text-[11px] text-[#7B8497]">
-                          ({doc.fileType}, {doc.size})
+                          ({FILE_TYPE_LABELS[doc.fileType] || doc.fileType},{" "}
+                          {doc.size})
                         </p>
                       </div>
                     </div>

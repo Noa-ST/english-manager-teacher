@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useSearchParams } from "next/navigation";
 import {
   CheckCircle2,
   Plus,
@@ -10,12 +11,15 @@ import {
 import {
   ADMIN_STUDENTS_DATA,
   CLASSROOMS_DATA,
+  type AdminStudentRecord,
+  type ClassroomGroup,
 } from "@/services/classroom-data";
 import { apiRequest } from "@/lib/api-client";
 import { removeVietnameseTones } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ModalDialog } from "@/components/ui/dialog";
+import { PaginationBar } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
 import {
   Table,
@@ -46,19 +50,44 @@ const ASSESSMENTS = [
   "Mid-term Academic Progress Check (Tháng 10/2026)",
 ];
 
+const SKILL_LABELS: Record<string, string> = {
+  listening: "Nghe",
+  reading: "Đọc",
+  writing: "Viết",
+  speaking: "Nói",
+};
+
+function mergeClassesWithDefaults(cached: ClassroomGroup[]): ClassroomGroup[] {
+  const map = new Map<string, ClassroomGroup>();
+  for (const c of CLASSROOMS_DATA) {
+    map.set(c.id, c);
+  }
+  for (const c of cached) {
+    map.set(c.id, c);
+  }
+  return Array.from(map.values());
+}
+
 export default function AdminGradesPage() {
   const { toast } = useToast();
+  const searchParams = useSearchParams();
+  const initialClassId = searchParams.get("classId") ?? "all";
+
+  const [classes, setClasses] = React.useState<ClassroomGroup[]>(CLASSROOMS_DATA);
+
   const [assessments, setAssessments] = React.useState<string[]>(ASSESSMENTS);
   const [selectedAssessment, setSelectedAssessment] = React.useState<string>(
     ASSESSMENTS[0],
   );
-  const [selectedClassId, setSelectedClassId] = React.useState<string>("all");
+  const [selectedClassId, setSelectedClassId] = React.useState<string>(initialClassId);
   const [searchQuery, setSearchQuery] = React.useState("");
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(10);
   const [isNewTestModalOpen, setIsNewTestModalOpen] = React.useState(false);
   const [newTestTitle, setNewTestTitle] = React.useState("");
 
   const [rows, setRows] = React.useState<GradeEntryRow[]>(() =>
-    ADMIN_STUDENTS_DATA.map((stu) => {
+    ADMIN_STUDENTS_DATA.filter((s) => s.status !== "archived").map((stu) => {
       const latest = stu.grades[0];
       return {
         studentId: stu.id,
@@ -75,6 +104,60 @@ export default function AdminGradesPage() {
     }),
   );
 
+  React.useEffect(() => {
+    apiRequest<{
+      assessments: string[];
+      classes: ClassroomGroup[];
+      students: AdminStudentRecord[];
+    }>("/api/admin/grades")
+      .then((data) => {
+        if (data.classes && data.classes.length > 0) {
+          const merged = mergeClassesWithDefaults(data.classes);
+          setClasses(merged);
+          if (typeof window !== "undefined") {
+            try {
+              localStorage.setItem("teacher_studio_classrooms_v1", JSON.stringify(merged));
+            } catch {}
+          }
+        }
+        if (data.assessments && data.assessments.length > 0) {
+          setAssessments(data.assessments);
+          setSelectedAssessment((curr) => curr || data.assessments[0]);
+        }
+        if (data.students && data.students.length > 0) {
+          setRows((prev) => {
+            const prevMap = new Map(prev.map((r) => [r.studentId, r]));
+            return data.students.map((stu) => {
+              const existing = prevMap.get(stu.id);
+              if (existing) {
+                return {
+                  ...existing,
+                  code: stu.code,
+                  fullName: stu.fullName,
+                  classId: stu.classId,
+                  className: stu.className,
+                };
+              }
+              const latest = stu.grades[0];
+              return {
+                studentId: stu.id,
+                code: stu.code,
+                fullName: stu.fullName,
+                classId: stu.classId,
+                className: stu.className,
+                listening: latest?.listening ?? 7.0,
+                reading: latest?.reading ?? 7.0,
+                writing: latest?.writing ?? 6.5,
+                speaking: latest?.speaking ?? 7.0,
+                comment: latest?.comment ?? stu.recentComment,
+              };
+            });
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   const visibleRows = React.useMemo(() => {
     return rows.filter((row) => {
       const matchesClass =
@@ -89,6 +172,13 @@ export default function AdminGradesPage() {
       return matchesClass && matchesSearch;
     });
   }, [rows, selectedClassId, searchQuery]);
+
+  const totalPages = Math.max(1, Math.ceil(visibleRows.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const paginatedRows = visibleRows.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize,
+  );
 
   const computeOverall = (r: GradeEntryRow) => {
     const raw = (r.listening + r.reading + r.writing + r.speaking) / 4;
@@ -230,11 +320,14 @@ export default function AdminGradesPage() {
           <select
             id="grade-class-select"
             value={selectedClassId}
-            onChange={(e) => setSelectedClassId(e.target.value)}
+            onChange={(e) => {
+              setSelectedClassId(e.target.value);
+              setPage(1);
+            }}
             className="h-9 w-full rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
           >
             <option value="all">Tất cả các lớp ({rows.length} học sinh)</option>
-            {CLASSROOMS_DATA.map((cls) => (
+            {classes.map((cls) => (
               <option key={cls.id} value={cls.id}>
                 {cls.code} — {cls.name}
               </option>
@@ -258,7 +351,10 @@ export default function AdminGradesPage() {
               id="grade-student-search"
               type="search"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setPage(1);
+              }}
               placeholder="Tên hoặc Mã HS..."
               className="h-9 pl-9"
             />
@@ -337,7 +433,7 @@ export default function AdminGradesPage() {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {visibleRows.map((row) => {
+          {paginatedRows.map((row) => {
             const overall = computeOverall(row);
             return (
               <TableRow key={row.studentId}>
@@ -362,7 +458,7 @@ export default function AdminGradesPage() {
                       onChange={(e) =>
                         handleScoreChange(row.studentId, skill, e.target.value)
                       }
-                      aria-label={`Điểm ${skill} của ${row.fullName}`}
+                      aria-label={`Điểm ${SKILL_LABELS[skill] || skill} của ${row.fullName}`}
                       className="mx-auto h-8 w-18 text-center font-mono text-xs font-semibold"
                     />
                   </TableCell>
@@ -388,6 +484,23 @@ export default function AdminGradesPage() {
           })}
         </TableBody>
       </Table>
+
+      {visibleRows.length > 0 && (
+        <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-2xs">
+          <PaginationBar
+            page={currentPage}
+            totalPages={totalPages}
+            totalItems={visibleRows.length}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={(sz) => {
+              setPageSize(sz);
+              setPage(1);
+            }}
+            pageSizeOptions={[10, 20, 50]}
+          />
+        </div>
+      )}
 
       {/* New Assessment Modal */}
       <ModalDialog

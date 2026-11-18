@@ -31,12 +31,14 @@ import {
   type AnnouncementItem,
   type HallOfFameStudent,
   type PodcastEpisode,
+  type ResourceFileItem,
   type StudentProjectItem,
 } from "@/services/classroom-data";
 import { apiRequest } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog, ModalDialog } from "@/components/ui/dialog";
+import { PaginationBar } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
@@ -75,6 +77,21 @@ const CMS_TABS: { id: CmsTab; label: string; icon: React.ReactNode }[] = [
     icon: <BookOpen className="size-4" aria-hidden="true" />,
   },
 ];
+
+const PROJECT_CATEGORY_LABELS: Record<string, string> = {
+  "Research Poster": "Poster nghiên cứu",
+  "Debate Portfolio": "Hồ sơ tranh biện",
+  "Video Presentation": "Video thuyết trình",
+  "Academic Essay": "Bài luận học thuật",
+};
+
+const FILE_TYPE_LABELS: Record<string, string> = {
+  PDF: "Tài liệu PDF",
+  SLIDE: "Slide bài giảng",
+  WORKSHEET: "Phiếu bài tập",
+  AUDIO: "Băng nghe (Audio)",
+  IMAGE: "Hình ảnh",
+};
 
 export default function AdminCmsPage() {
   const { toast } = useToast();
@@ -131,18 +148,28 @@ export default function AdminCmsPage() {
     React.useState<StudentProjectItem["category"]>("Research Poster");
   const [projSummary, setProjSummary] = React.useState("");
 
+  // 5. Resources State
+  const [resources, setResources] =
+    React.useState<ResourceFileItem[]>(RESOURCE_FILES_DATA);
+
+  // Pagination State
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(6);
+
   React.useEffect(() => {
     apiRequest<{
       announcements: AnnouncementItem[];
       podcasts: PodcastEpisode[];
       hallOfFame: HallOfFameStudent[];
       projects: StudentProjectItem[];
+      resources?: ResourceFileItem[];
     }>("/api/admin/cms")
       .then((res) => {
-        setAnnouncements(res.announcements);
-        setPodcasts(res.podcasts);
-        setHonors(res.hallOfFame);
-        setProjects(res.projects);
+        if (res.announcements) setAnnouncements(res.announcements);
+        if (res.podcasts) setPodcasts(res.podcasts);
+        if (res.hallOfFame) setHonors(res.hallOfFame);
+        if (res.projects) setProjects(res.projects);
+        if (res.resources) setResources(res.resources);
       })
       .catch(() => {});
   }, []);
@@ -346,6 +373,51 @@ export default function AdminCmsPage() {
     setProjModalOpen(false);
   };
 
+  const currentListLength = React.useMemo(() => {
+    switch (activeTab) {
+      case "announcements":
+        return announcements.length;
+      case "podcast":
+        return podcasts.length;
+      case "hall-of-fame":
+        return honors.length;
+      case "projects":
+        return projects.length;
+      case "resources":
+        return resources.length;
+      default:
+        return 0;
+    }
+  }, [activeTab, announcements.length, podcasts.length, honors.length, projects.length, resources.length]);
+
+  const totalPages = Math.max(1, Math.ceil(currentListLength / pageSize));
+  const currentPage = Math.min(page, totalPages);
+
+  const paginatedAnnouncements = React.useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return announcements.slice(start, start + pageSize);
+  }, [announcements, currentPage, pageSize]);
+
+  const paginatedPodcasts = React.useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return podcasts.slice(start, start + pageSize);
+  }, [podcasts, currentPage, pageSize]);
+
+  const paginatedHonors = React.useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return honors.slice(start, start + pageSize);
+  }, [honors, currentPage, pageSize]);
+
+  const paginatedProjects = React.useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return projects.slice(start, start + pageSize);
+  }, [projects, currentPage, pageSize]);
+
+  const paginatedResources = React.useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return resources.slice(start, start + pageSize);
+  }, [resources, currentPage, pageSize]);
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -400,7 +472,10 @@ export default function AdminCmsPage() {
               type="button"
               role="tab"
               aria-selected={active}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => {
+                setActiveTab(tab.id);
+                setPage(1);
+              }}
               className={cn(
                 "inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold transition-all",
                 active
@@ -418,7 +493,7 @@ export default function AdminCmsPage() {
       {/* TAB 1: ANNOUNCEMENTS */}
       {activeTab === "announcements" && (
         <div className="space-y-4">
-          {announcements.map((item) => (
+          {paginatedAnnouncements.map((item) => (
             <div
               key={item.id}
               className="flex flex-col justify-between gap-4 rounded-2xl border border-border bg-card p-5 sm:flex-row sm:items-center"
@@ -490,7 +565,7 @@ export default function AdminCmsPage() {
       {/* TAB 2: PODCASTS */}
       {activeTab === "podcast" && (
         <div className="grid gap-4 md:grid-cols-2">
-          {podcasts.map((ep) => (
+          {paginatedPodcasts.map((ep) => (
             <div
               key={ep.id}
               className="flex flex-col justify-between rounded-2xl border border-border bg-card p-5"
@@ -539,7 +614,7 @@ export default function AdminCmsPage() {
       {/* TAB 3: HALL OF FAME */}
       {activeTab === "hall-of-fame" && (
         <div className="grid gap-4 md:grid-cols-2">
-          {honors.map((h) => (
+          {paginatedHonors.map((h) => (
             <div
               key={h.id}
               className="flex flex-col justify-between rounded-2xl border border-border bg-card p-5"
@@ -590,14 +665,16 @@ export default function AdminCmsPage() {
       {/* TAB 4: STUDENT PROJECTS */}
       {activeTab === "projects" && (
         <div className="grid gap-4 md:grid-cols-2">
-          {projects.map((p) => (
+          {paginatedProjects.map((p) => (
             <div
               key={p.id}
               className="flex flex-col justify-between rounded-2xl border border-border bg-card p-5"
             >
               <div>
                 <div className="flex items-center justify-between gap-2">
-                  <Badge variant="secondary">{p.category}</Badge>
+                  <Badge variant="secondary">
+                    {PROJECT_CATEGORY_LABELS[p.category] || p.category}
+                  </Badge>
                   <Badge variant="warm">{p.featuredMetric}</Badge>
                 </div>
                 <h3 className="mt-2.5 font-heading text-base font-bold text-foreground">
@@ -635,7 +712,7 @@ export default function AdminCmsPage() {
       {/* TAB 5: PUBLIC RESOURCES QUICK SYNC */}
       {activeTab === "resources" && (
         <div className="space-y-3">
-          {RESOURCE_FILES_DATA.map((file) => (
+          {paginatedResources.map((file) => (
             <div
               key={file.id}
               className="flex items-center justify-between gap-4 rounded-2xl border border-border bg-card p-4"
@@ -648,10 +725,12 @@ export default function AdminCmsPage() {
                     }
                   >
                     {file.visibility === "public"
-                      ? "Công khai (Public)"
-                      : "Nội bộ (Private)"}
+                      ? "Công khai"
+                      : "Nội bộ"}
                   </Badge>
-                  <Badge variant="secondary">{file.fileType}</Badge>
+                  <Badge variant="secondary">
+                    {FILE_TYPE_LABELS[file.fileType] || file.fileType}
+                  </Badge>
                   <span className="text-xs text-muted-foreground">
                     {file.folderName}
                   </span>
@@ -667,6 +746,20 @@ export default function AdminCmsPage() {
           ))}
         </div>
       )}
+
+      {/* Pagination for active tab list */}
+      <PaginationBar
+        page={currentPage}
+        totalPages={totalPages}
+        totalItems={currentListLength}
+        pageSize={pageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(sz) => {
+          setPageSize(sz);
+          setPage(1);
+        }}
+        pageSizeOptions={[6, 12, 24]}
+      />
 
       {/* MODAL: RICH TEXT ANNOUNCEMENT EDITOR */}
       <ModalDialog
@@ -1087,10 +1180,10 @@ export default function AdminCmsPage() {
                 }
                 className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs font-medium text-foreground"
               >
-                <option value="Research Poster">Research Poster</option>
-                <option value="Debate Portfolio">Debate Portfolio</option>
-                <option value="Video Presentation">Video Presentation</option>
-                <option value="Academic Essay">Academic Essay</option>
+                <option value="Research Poster">Poster nghiên cứu (Research Poster)</option>
+                <option value="Debate Portfolio">Hồ sơ tranh biện (Debate Portfolio)</option>
+                <option value="Video Presentation">Video thuyết trình (Video Presentation)</option>
+                <option value="Academic Essay">Bài luận học thuật (Academic Essay)</option>
               </select>
             </div>
           </div>

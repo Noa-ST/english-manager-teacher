@@ -103,23 +103,59 @@ export function PaginationBar({
   totalItems,
   pageSize,
   onPageChange,
+  onPageSizeChange,
+  pageSizeOptions = [10, 20, 50],
 }: {
   page: number;
   totalPages: number;
   totalItems: number;
   pageSize: number;
   onPageChange: (nextPage: number) => void;
+  onPageSizeChange?: (nextPageSize: number) => void;
+  pageSizeOptions?: number[];
 }) {
   const start = totalItems === 0 ? 0 : (page - 1) * pageSize + 1;
   const end = Math.min(totalItems, page * pageSize);
 
+  const visiblePages = React.useMemo(() => {
+    if (totalPages <= 7) {
+      return Array.from({ length: totalPages }, (_, idx) => idx + 1);
+    }
+    if (page <= 4) {
+      return [1, 2, 3, 4, 5, "...", totalPages];
+    }
+    if (page >= totalPages - 3) {
+      return [1, "...", totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+    }
+    return [1, "...", page - 1, page, page + 1, "...", totalPages];
+  }, [page, totalPages]);
+
   return (
     <div className="flex flex-col items-center justify-between gap-3 border-t border-border px-4 py-3 text-xs text-muted-foreground sm:flex-row">
-      <span>
-        Hiển thị <strong className="font-medium text-foreground">{start}</strong> –{" "}
-        <strong className="font-medium text-foreground">{end}</strong> trong tổng số{" "}
-        <strong className="font-medium text-foreground">{totalItems}</strong> mục
-      </span>
+      <div className="flex flex-wrap items-center gap-2">
+        <span>
+          Hiển thị <strong className="font-medium text-foreground">{start}</strong> –{" "}
+          <strong className="font-medium text-foreground">{end}</strong> trong tổng số{" "}
+          <strong className="font-medium text-foreground">{totalItems}</strong> mục
+        </span>
+        {onPageSizeChange && (
+          <div className="flex items-center gap-1.5 border-l border-border pl-2.5">
+            <span>Hiển thị:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => onPageSizeChange(Number(e.target.value))}
+              aria-label="Số dòng hiển thị mỗi trang"
+              className="h-6 rounded-md border border-input bg-background px-1.5 text-xs font-medium text-foreground"
+            >
+              {pageSizeOptions.map((sz) => (
+                <option key={sz} value={sz}>
+                  {sz} / trang
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
       <div className="flex items-center gap-1.5">
         <Button
           variant="outline"
@@ -131,19 +167,28 @@ export function PaginationBar({
           <ChevronLeft className="size-3.5" aria-hidden="true" />
           Trước
         </Button>
-        {Array.from({ length: totalPages }, (_, idx) => idx + 1).map((pageNum) => (
-          <Button
-            key={pageNum}
-            variant={pageNum === page ? "default" : "outline"}
-            size="xs"
-            onClick={() => onPageChange(pageNum)}
-            aria-label={`Trang ${pageNum}`}
-            aria-current={pageNum === page ? "page" : undefined}
-            className="min-w-7"
-          >
-            {pageNum}
-          </Button>
-        ))}
+        {visiblePages.map((item, idx) =>
+          typeof item === "number" ? (
+            <Button
+              key={`page-${item}`}
+              variant={item === page ? "default" : "outline"}
+              size="xs"
+              onClick={() => onPageChange(item)}
+              aria-label={`Trang ${item}`}
+              aria-current={item === page ? "page" : undefined}
+              className="min-w-7"
+            >
+              {item}
+            </Button>
+          ) : (
+            <span
+              key={`ellipsis-${idx}`}
+              className="px-1 text-xs text-muted-foreground select-none"
+            >
+              …
+            </span>
+          ),
+        )}
         <Button
           variant="outline"
           size="xs"

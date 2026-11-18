@@ -5,10 +5,12 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  BarChart3,
   Bell,
   BookOpen,
   CalendarDays,
   CheckSquare,
+  ClipboardList,
   ExternalLink,
   FileSpreadsheet,
   FolderKanban,
@@ -38,8 +40,10 @@ const NAV_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   "/students": Users,
   "/classes": BookOpen,
   "/schedule": CalendarDays,
+  "/teaching-journal": ClipboardList,
   "/attendance": CheckSquare,
   "/grades": FileSpreadsheet,
+  "/class-analytics": BarChart3,
   "/cms": Newspaper,
   "/storage": FolderKanban,
   "/settings": Settings,
