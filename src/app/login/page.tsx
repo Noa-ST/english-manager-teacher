@@ -10,31 +10,32 @@ import {
   ArrowLeft,
   BookOpen,
   CheckCircle2,
-  ChevronDown,
   Eye,
   EyeOff,
   GraduationCap,
   Lock,
-  LogIn,
   Mail,
+  ShieldCheck,
   TrendingUp,
   Users,
-  Zap,
 } from "lucide-react";
 import { cn } from "cn";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { apiRequest } from "@/lib/api-client";
 import { BigBenSilhouette } from "@/components/viewer/big-ben-silhouette";
 import { SiteFooter } from "@/components/viewer/site-footer";
-import { TEACHER_PROFILE } from "@/services/classroom-data";
-
-const IS_DEV = process.env.NODE_ENV !== "production";
 
 function LoginFormContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const nextParam = searchParams.get("next");
+  const roleParam = searchParams.get("role");
+
+  const [userSelectedRole, setUserSelectedRole] = React.useState<"student" | "admin" | null>(null);
+  const activeRole: "student" | "admin" =
+    userSelectedRole ?? (roleParam === "admin" ? "admin" : "student");
 
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -45,11 +46,31 @@ function LoginFormContent() {
 
   const [resetMode, setResetMode] = React.useState(false);
   const [resetSent, setResetSent] = React.useState(false);
-  const [quickLoginOpen, setQuickLoginOpen] = React.useState(false);
+  const [supportEmail, setSupportEmail] = React.useState("");
   const errorSummaryRef = React.useRef<HTMLDivElement>(null);
 
+  React.useEffect(() => {
+    let active = true;
+    apiRequest<{ teacher?: { email?: string } }>("/api/viewer/overview")
+      .then((res) => {
+        if (!active || !res?.teacher?.email) return;
+        setSupportEmail(res.teacher.email);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const resolveDestination = (role: "admin" | "student", defaultPath: string) => {
-    if (!nextParam || !nextParam.startsWith("/")) return defaultPath;
+    if (
+      !nextParam ||
+      !nextParam.startsWith("/") ||
+      nextParam.startsWith("//") ||
+      nextParam.startsWith("/\\")
+    ) {
+      return defaultPath;
+    }
     if (role === "student" && !nextParam.startsWith("/student")) {
       return "/student";
     }
@@ -63,7 +84,11 @@ function LoginFormContent() {
       const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: targetEmail.trim(), password: targetPassword }),
+        body: JSON.stringify({
+          email: targetEmail.trim(),
+          password: targetPassword,
+          rememberMe,
+        }),
       });
 
       const payload = (await response.json()) as {
@@ -73,10 +98,11 @@ function LoginFormContent() {
       };
 
       if (!response.ok || !payload.ok || !payload.data) {
-        setError(
-          payload.error?.message ||
-            "Thông tin đăng nhập chưa chính xác. Vui lòng kiểm tra lại email hoặc mật khẩu.",
-        );
+        const defaultMsg =
+          activeRole === "student"
+            ? "Email hoặc mật khẩu chưa chính xác. Vui lòng kiểm tra lại thông tin tài khoản được giáo viên cấp."
+            : "Email hoặc mật khẩu quản trị chưa chính xác. Vui lòng kiểm tra lại.";
+        setError(payload.error?.message || defaultMsg);
         window.setTimeout(() => errorSummaryRef.current?.focus(), 50);
         setLoading(false);
         return;
@@ -92,37 +118,6 @@ function LoginFormContent() {
     }
   };
 
-  const handleQuickLogin = async (role: "admin" | "student") => {
-    if (!IS_DEV) return;
-    setError(null);
-    setLoading(true);
-    try {
-      const response = await fetch("/api/auth/quick-login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role }),
-      });
-      const payload = (await response.json()) as {
-        ok: boolean;
-        data?: { user: { role: "admin" | "student" }; redirectTo: string };
-        error?: { message?: string };
-      };
-
-      if (!response.ok || !payload.ok || !payload.data) {
-        setError(payload.error?.message || "Không thể đăng nhập nhanh.");
-        setLoading(false);
-        return;
-      }
-
-      const dest = resolveDestination(payload.data.user.role, payload.data.redirectTo);
-      router.push(dest as never);
-      router.refresh();
-    } catch {
-      setError("Không thể kết nối máy chủ xác thực.");
-      setLoading(false);
-    }
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (resetMode) {
@@ -133,14 +128,29 @@ function LoginFormContent() {
       setError(null);
       setLoading(true);
       try {
-        await fetch("/api/auth/reset-password", {
+        const response = await fetch("/api/auth/reset-password", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email: email.trim() }),
         });
+        let payload: { error?: { message?: string } } | null = null;
+        try {
+          payload = (await response.json()) as { error?: { message?: string } };
+        } catch {
+          payload = null;
+        }
+        if (!response.ok) {
+          setError(
+            payload?.error?.message ||
+              "Không thể gửi yêu cầu khôi phục mật khẩu. Vui lòng thử lại sau.",
+          );
+          window.setTimeout(() => errorSummaryRef.current?.focus(), 50);
+          return;
+        }
         setResetSent(true);
       } catch {
         setError("Không thể gửi yêu cầu khôi phục mật khẩu.");
+        window.setTimeout(() => errorSummaryRef.current?.focus(), 50);
       } finally {
         setLoading(false);
       }
@@ -327,6 +337,75 @@ function LoginFormContent() {
                   </div>
                 </div>
 
+                {/* Role Switcher Tabs (Học sinh vs Giáo viên) */}
+                {!resetMode && (
+                  <div className="mt-5">
+                    <div className="grid grid-cols-2 gap-1 rounded-xl border border-[#E3E7EF] bg-[#F5F7FB] p-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUserSelectedRole("student");
+                          setError(null);
+                        }}
+                        className={cn(
+                          "flex items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-semibold transition-all",
+                          activeRole === "student"
+                            ? "bg-white text-[#243B64] shadow-xs font-bold"
+                            : "text-[#556075] hover:text-[#243B64]",
+                        )}
+                      >
+                        <GraduationCap className="size-4" aria-hidden="true" />
+                        <span>Học sinh</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUserSelectedRole("admin");
+                          setError(null);
+                        }}
+                        className={cn(
+                          "flex items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-semibold transition-all",
+                          activeRole === "admin"
+                            ? "bg-white text-[#1E3458] shadow-xs font-bold"
+                            : "text-[#556075] hover:text-[#1E3458]",
+                        )}
+                      >
+                        <ShieldCheck className="size-4" aria-hidden="true" />
+                        <span>Giáo viên (Admin)</span>
+                      </button>
+                    </div>
+
+                    {/* Contextual Guidance Callout */}
+                    {activeRole === "student" ? (
+                      <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-[#D9AE54]/35 bg-[#FFFDF9] p-3 text-xs">
+                        <GraduationCap
+                          className="mt-0.5 size-4 shrink-0 text-[#B88728]"
+                          aria-hidden="true"
+                        />
+                        <div className="leading-relaxed">
+                          <p className="font-semibold text-[#1E3458]">Cổng Học sinh &amp; Tra cứu</p>
+                          <p className="mt-0.5 text-[11px] text-[#556075]">
+                            Đăng nhập bằng <strong>Email</strong> và <strong>Mật khẩu</strong> do giáo viên cấp sẵn khi vào lớp để tra cứu điểm, nhận xét &amp; tải học liệu nội bộ.
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-[#243B64]/20 bg-[#F0F4FA] p-3 text-xs">
+                        <ShieldCheck
+                          className="mt-0.5 size-4 shrink-0 text-[#243B64]"
+                          aria-hidden="true"
+                        />
+                        <div className="leading-relaxed">
+                          <p className="font-semibold text-[#1E3458]">Cổng Quản trị Giáo viên</p>
+                          <p className="mt-0.5 text-[11px] text-[#556075]">
+                            Dành cho ThS. Nguyễn Minh Anh và quản trị viên quản lý lớp học, điểm danh, chấm bài, CMS &amp; tài liệu.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Error Alert Box */}
                 {error && (
                   <div
@@ -365,7 +444,7 @@ function LoginFormContent() {
                 )}
 
                 {/* Sign-in Form */}
-                <form onSubmit={handleSubmit} className="mt-6 space-y-4" noValidate>
+                <form onSubmit={handleSubmit} className="mt-5 space-y-4" noValidate>
                   {/* Email Field */}
                   <div className="space-y-1.5">
                     <Label
@@ -373,7 +452,11 @@ function LoginFormContent() {
                       className="flex items-center gap-1.5 text-xs font-semibold text-[#253047]"
                     >
                       <Mail className="size-3.5 text-[#243B64]" aria-hidden="true" />
-                      Email của bạn
+                      {resetMode
+                        ? "Email của bạn"
+                        : activeRole === "student"
+                          ? "Email học sinh (do giáo viên cấp)"
+                          : "Email giáo viên / quản trị viên"}
                     </Label>
                     <Input
                       id="login-email"
@@ -383,7 +466,11 @@ function LoginFormContent() {
                       required
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      placeholder="Nhập email..."
+                      placeholder={
+                        activeRole === "student"
+                          ? "VD: ngoc.tran@student.edu.vn hoặc email được cấp..."
+                          : "VD: teacher@englishmanager.edu.vn..."
+                      }
                       className="h-11 rounded-xl border-[#D8DFEC] bg-white px-3.5 text-xs text-[#253047] placeholder:text-[#9AA2B1] focus-visible:border-[#243B64] focus-visible:ring-2 focus-visible:ring-[#243B64]/20"
                     />
                   </div>
@@ -396,7 +483,7 @@ function LoginFormContent() {
                         className="flex items-center gap-1.5 text-xs font-semibold text-[#253047]"
                       >
                         <Lock className="size-3.5 text-[#243B64]" aria-hidden="true" />
-                        Mật khẩu
+                        {activeRole === "student" ? "Mật khẩu học sinh" : "Mật khẩu quản trị"}
                       </Label>
                       <div className="relative">
                         <Input
@@ -407,7 +494,11 @@ function LoginFormContent() {
                           required
                           value={password}
                           onChange={(e) => setPassword(e.target.value)}
-                          placeholder="Nhập mật khẩu..."
+                          placeholder={
+                            activeRole === "student"
+                              ? "Nhập mật khẩu do giáo viên cấp..."
+                              : "Nhập mật khẩu quản trị..."
+                          }
                           className="h-11 rounded-xl border-[#D8DFEC] bg-white pr-10 pl-3.5 text-xs text-[#253047] placeholder:text-[#9AA2B1] focus-visible:border-[#243B64] focus-visible:ring-2 focus-visible:ring-[#243B64]/20"
                         />
                         <button
@@ -438,17 +529,29 @@ function LoginFormContent() {
                         />
                         <span className="text-xs text-[#556075]">Ghi nhớ đăng nhập</span>
                       </label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setResetMode(true);
-                          setError(null);
-                          setResetSent(false);
-                        }}
-                        className="text-xs font-semibold text-[#243B64] transition-colors hover:underline"
-                      >
-                        Quên mật khẩu?
-                      </button>
+                      {activeRole === "admin" ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setResetMode(true);
+                            setError(null);
+                            setResetSent(false);
+                          }}
+                          className="text-xs font-semibold text-[#243B64] transition-colors hover:underline"
+                        >
+                          Quên mật khẩu?
+                        </button>
+                      ) : (
+                        <span className="text-[11px] text-[#7B8497]">
+                          Quên mật khẩu?{" "}
+                          <Link
+                            href={supportEmail ? `mailto:${supportEmail}` : "/"}
+                            className="font-medium text-[#243B64] hover:underline"
+                          >
+                            Báo giáo viên
+                          </Link>
+                        </span>
+                      )}
                     </div>
                   )}
 
@@ -485,10 +588,15 @@ function LoginFormContent() {
                         </span>
                       ) : resetMode ? (
                         <span>Gửi liên kết đặt lại mật khẩu</span>
+                      ) : activeRole === "student" ? (
+                        <span className="inline-flex items-center gap-2">
+                          <GraduationCap className="size-4" aria-hidden="true" />
+                          Đăng nhập Cổng Học sinh
+                        </span>
                       ) : (
                         <span className="inline-flex items-center gap-2">
-                          <LogIn className="size-4" aria-hidden="true" />
-                          Đăng nhập
+                          <ShieldCheck className="size-4 text-[#D9AE54]" aria-hidden="true" />
+                          Đăng nhập Cổng Quản trị
                         </span>
                       )}
                     </Button>
@@ -511,80 +619,23 @@ function LoginFormContent() {
                   )}
                 </form>
 
-                {/* Development Quick-Login Card (Strictly Gated to IS_DEV) */}
-                {IS_DEV && !resetMode && (
-                  <div className="mt-5 overflow-hidden rounded-xl border border-amber-200/90 bg-[#FFF9ED] text-xs">
-                    <button
-                      type="button"
-                      onClick={() => setQuickLoginOpen((v) => !v)}
-                      className="flex w-full items-center justify-between p-3.5 text-left transition-colors hover:bg-amber-100/40"
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-700">
-                          <Zap className="size-4 fill-amber-500 text-amber-600" aria-hidden="true" />
-                        </div>
-                        <div>
-                          <p className="font-heading font-bold text-[#1E3458]">
-                            Vào nhanh 1-chạm
-                          </p>
-                          <p className="text-[11px] text-[#7B8497]">
-                            (Chỉ dành cho môi trường phát triển)
-                          </p>
-                        </div>
-                      </div>
-                      <ChevronDown
-                        className={cn(
-                          "size-4 text-[#7B8497] transition-transform duration-200",
-                          quickLoginOpen && "rotate-180",
-                        )}
-                        aria-hidden="true"
-                      />
-                    </button>
-
-                    {quickLoginOpen && (
-                      <div className="border-t border-amber-200/70 p-3 pt-2.5">
-                        <p className="mb-2 text-[11px] text-[#556075]">
-                          Đăng nhập tức thì bằng tài khoản Supabase Auth được định cấu hình:
-                        </p>
-                        <div className="grid grid-cols-2 gap-2">
-                          <button
-                            type="button"
-                            disabled={loading}
-                            onClick={() => void handleQuickLogin("admin")}
-                            className="rounded-lg border border-[#D8DFEC] bg-white px-2.5 py-1.5 text-left font-medium text-[#1E3458] shadow-2xs transition-colors hover:border-[#1E3458] hover:bg-[#F5F7FB]"
-                          >
-                            <p className="font-semibold text-[11px]">Giáo viên / Quản trị viên</p>
-                            <p className="text-[10px] text-[#7B8497] truncate">
-                              teacher@example.com
-                            </p>
-                          </button>
-                          <button
-                            type="button"
-                            disabled={loading}
-                            onClick={() => void handleQuickLogin("student")}
-                            className="rounded-lg border border-[#D8DFEC] bg-white px-2.5 py-1.5 text-left font-medium text-[#1E3458] shadow-2xs transition-colors hover:border-[#1E3458] hover:bg-[#F5F7FB]"
-                          >
-                            <p className="font-semibold text-[11px]">Học sinh / Cổng học vụ</p>
-                            <p className="text-[10px] text-[#7B8497] truncate">
-                              student1@example.com
-                            </p>
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
                 {/* Help Note */}
-                <p className="mt-5 text-center text-xs text-[#7B8497]">
-                  Bạn cần hỗ trợ?{" "}
-                  <Link
-                    href={`mailto:${TEACHER_PROFILE.email}`}
-                    className="font-semibold text-[#243B64] hover:underline"
-                  >
-                    Liên hệ giáo viên của bạn
-                  </Link>
-                </p>
+                <div className="mt-5 rounded-xl bg-[#F5F7FB] p-3 text-center text-xs text-[#7B8497]">
+                  <p>
+                    {activeRole === "student"
+                      ? "💡 Tài khoản học sinh do giáo viên cấp trực tiếp khi tham gia khóa học."
+                      : "💡 Tài khoản giáo viên và quản trị viên do hệ thống trung tâm phân quyền."}
+                  </p>
+                  <p className="mt-1">
+                    Cần hỗ trợ?{" "}
+                    <Link
+                      href={supportEmail ? `mailto:${supportEmail}` : "/"}
+                      className="font-semibold text-[#243B64] hover:underline"
+                    >
+                      Liên hệ ThS. Nguyễn Minh Anh
+                    </Link>
+                  </p>
+                </div>
               </div>
             </section>
           </div>

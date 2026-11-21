@@ -1,84 +1,358 @@
 "use client";
 
 import * as React from "react";
+import { useSearchParams } from "next/navigation";
 import {
   BookOpen,
-  Calendar,
   Clock,
   Headphones,
   ListMusic,
-  Play,
-  Search,
+  RefreshCw,
   Sparkles,
-  Volume2,
 } from "lucide-react";
 import {
-  PODCAST_EPISODES_DATA,
-  type PodcastEpisode,
-} from "@/services/classroom-data";
+  computePodcastStats,
+  countPodcastsByCategory,
+  filterAndSortPodcasts,
+  formatTotalListeningDuration,
+  getAdjacentEpisodes,
+  parseShowNoteChapters,
+  resolveActiveChapterIndex,
+  selectDefaultEpisode,
+  type PodcastCategoryFilter,
+  type PodcastSortKey,
+  type PublicPodcastEpisode,
+  type ViewerPodcastHost,
+  type ViewerPodcastsPayload,
+} from "@/services/podcast-helpers";
 import { apiRequest } from "@/lib/api-client";
+import {
+  AudioPlayer,
+  type AudioPlayerHandle,
+} from "@/components/viewer/audio-player";
+import { PodcastEpisodeCard } from "@/components/viewer/podcast/podcast-episode-card";
+import { PodcastShowNotesPanel } from "@/components/viewer/podcast/podcast-show-notes-panel";
+import { PodcastToolbar } from "@/components/viewer/podcast/podcast-toolbar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Breadcrumb, EmptyState } from "@/components/ui/feedback";
-import { Input } from "@/components/ui/input";
-import { AudioPlayer } from "@/components/viewer/audio-player";
-import { cn } from "@/lib/utils";
+import {
+  Breadcrumb,
+  EmptyState,
+  PaginationBar,
+  Skeleton,
+} from "@/components/ui/feedback";
+import { useToast } from "@/components/ui/toast";
 
-const PODCAST_CATEGORIES: {
-  value: "all" | PodcastEpisode["category"];
-  label: string;
-}[] = [
-  { value: "all", label: "Tất cả chủ đề" },
-  { value: "weekly-digest", label: "Tổng kết tuần" },
-  { value: "ielts-listening", label: "IELTS & Học thuật" },
-  { value: "pronunciation", label: "Phát âm & Ngữ điệu" },
-  { value: "parent-corner", label: "Góc Phụ huynh" },
-];
+const VALID_CATEGORIES = new Set<string>([
+  "all",
+  "weekly-digest",
+  "ielts-listening",
+  "pronunciation",
+  "parent-corner",
+]);
 
-export default function PodcastPage() {
-  const [episodes, setEpisodes] = React.useState<PodcastEpisode[]>(
-    PODCAST_EPISODES_DATA,
+const VALID_SORTS = new Set<string>([
+  "newest",
+  "oldest",
+  "shortest",
+  "longest",
+]);
+
+function parseCategoryParam(raw: string | null): PodcastCategoryFilter {
+  if (raw && VALID_CATEGORIES.has(raw)) {
+    return raw as PodcastCategoryFilter;
+  }
+  return "all";
+}
+
+function parseSortParam(raw: string | null): PodcastSortKey {
+  if (raw && VALID_SORTS.has(raw)) {
+    return raw as PodcastSortKey;
+  }
+  return "newest";
+}
+
+function PodcastSkeleton() {
+  return (
+    <div className="mx-auto max-w-7xl space-y-10 px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
+      <div className="space-y-3">
+        <Skeleton className="h-4 w-48" />
+        <Skeleton className="h-10 w-96 max-w-full" />
+        <Skeleton className="h-4 w-120 max-w-full" />
+      </div>
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Skeleton className="h-20 rounded-2xl" />
+        <Skeleton className="h-20 rounded-2xl" />
+        <Skeleton className="h-20 rounded-2xl" />
+      </div>
+      <div className="grid gap-8 lg:grid-cols-12">
+        <Skeleton className="h-96 rounded-2xl lg:col-span-7" />
+        <Skeleton className="h-96 rounded-2xl lg:col-span-5" />
+      </div>
+      <Skeleton className="h-28 rounded-2xl" />
+    </div>
   );
+}
+
+function PodcastPageContent() {
+  const searchParams = useSearchParams();
+  const { toast } = useToast();
+  const playerRef = React.useRef<AudioPlayerHandle | null>(null);
+  const studioSectionRef = React.useRef<HTMLElement | null>(null);
+
+  const [episodes, setEpisodes] = React.useState<PublicPodcastEpisode[]>([]);
+  const [host, setHost] = React.useState<ViewerPodcastHost>({
+    name: "",
+    title: "",
+    avatarUrl: "/images/teacher-avatar.jpg",
+  });
+  const [currentTerm, setCurrentTerm] = React.useState("");
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = React.useState(0);
+
   const [activeEpisodeId, setActiveEpisodeId] = React.useState<string>(
-    PODCAST_EPISODES_DATA[0]?.id ?? "",
+    () => searchParams.get("episode") ?? "",
   );
-  const [selectedCategory, setSelectedCategory] = React.useState<
-    "all" | PodcastEpisode["category"]
-  >("all");
-  const [searchQuery, setSearchQuery] = React.useState("");
+  const [playbackTime, setPlaybackTime] = React.useState(0);
+
+  const [selectedCategory, setSelectedCategory] =
+    React.useState<PodcastCategoryFilter>(() =>
+      parseCategoryParam(searchParams.get("category")),
+    );
+  const [sortBy, setSortBy] = React.useState<PodcastSortKey>(() =>
+    parseSortParam(searchParams.get("sort")),
+  );
+  const [onlyWithAudio, setOnlyWithAudio] = React.useState<boolean>(
+    () => searchParams.get("audio") === "1",
+  );
+  const [searchQuery, setSearchQuery] = React.useState<string>(
+    () => searchParams.get("q") ?? "",
+  );
+
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(6);
 
   React.useEffect(() => {
-    apiRequest<PodcastEpisode[]>("/api/viewer/podcasts")
-      .then((items) => {
-        if (items.length > 0) setEpisodes(items);
+    let active = true;
+    apiRequest<ViewerPodcastsPayload>("/api/viewer/podcasts")
+      .then((res) => {
+        if (!active) return;
+        setEpisodes(Array.isArray(res?.items) ? res.items : []);
+        setHost(
+          res?.host ?? {
+            name: "",
+            title: "",
+            avatarUrl: "/images/teacher-avatar.jpg",
+          },
+        );
+        setCurrentTerm(res?.currentTerm ?? "");
+        setError(null);
       })
-      .catch(() => {});
-  }, []);
+      .catch(() => {
+        if (!active) return;
+        setError("Không thể tải danh sách Podcast học thuật. Vui lòng thử lại.");
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [reloadNonce]);
+
+  const syncUrlParams = (next: {
+    episode: string;
+    category: PodcastCategoryFilter;
+    sort: PodcastSortKey;
+    audio: boolean;
+    q: string;
+  }) => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams();
+    if (next.episode) params.set("episode", next.episode);
+    if (next.category !== "all") params.set("category", next.category);
+    if (next.sort !== "newest") params.set("sort", next.sort);
+    if (next.audio) params.set("audio", "1");
+    if (next.q.trim()) params.set("q", next.q.trim());
+    const qs = params.toString();
+    const targetUrl = qs ? `/podcast?${qs}` : "/podcast";
+    window.history.replaceState(null, "", targetUrl);
+  };
+
+  const stats = React.useMemo(() => computePodcastStats(episodes), [episodes]);
+  const categoryCounts = React.useMemo(
+    () => countPodcastsByCategory(episodes),
+    [episodes],
+  );
+
+  const filteredEpisodes = React.useMemo(
+    () =>
+      filterAndSortPodcasts(episodes, {
+        category: selectedCategory,
+        search: searchQuery,
+        onlyWithAudio,
+        sortBy,
+      }),
+    [episodes, selectedCategory, searchQuery, onlyWithAudio, sortBy],
+  );
 
   const activeEpisode = React.useMemo(
-    () =>
-      episodes.find((ep) => ep.id === activeEpisodeId) ?? episodes[0],
+    () => selectDefaultEpisode(episodes, activeEpisodeId || null),
     [episodes, activeEpisodeId],
   );
 
-  const filteredEpisodes = React.useMemo(() => {
-    return episodes.filter((ep) => {
-      const matchesCat =
-        selectedCategory === "all" || ep.category === selectedCategory;
-      const q = searchQuery.trim().toLowerCase();
-      const matchesQuery =
-        !q ||
-        ep.title.toLowerCase().includes(q) ||
-        ep.summary.toLowerCase().includes(q) ||
-        ep.vocabularyHighlights.some((v) => v.term.toLowerCase().includes(q));
-      return matchesCat && matchesQuery;
-    });
-  }, [episodes, selectedCategory, searchQuery]);
+  const chapters = React.useMemo(
+    () => parseShowNoteChapters(activeEpisode?.showNotes ?? []),
+    [activeEpisode],
+  );
 
-  if (!activeEpisode) return null;
+  const activeChapterIndex = React.useMemo(
+    () => resolveActiveChapterIndex(chapters, playbackTime),
+    [chapters, playbackTime],
+  );
+
+  const navigationPlaylist =
+    filteredEpisodes.length > 0 ? filteredEpisodes : episodes;
+  const adjacentEpisodes = React.useMemo(
+    () =>
+      activeEpisode
+        ? getAdjacentEpisodes(activeEpisode.id, navigationPlaylist)
+        : { prev: null, next: null },
+    [activeEpisode, navigationPlaylist],
+  );
+
+  const totalPages = Math.max(1, Math.ceil(filteredEpisodes.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const paginatedEpisodes = React.useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredEpisodes.slice(start, start + pageSize);
+  }, [filteredEpisodes, currentPage, pageSize]);
+
+  const handleRetry = () => {
+    setLoading(true);
+    setError(null);
+    setReloadNonce((n) => n + 1);
+  };
+
+  const handleSelectEpisode = (ep: PublicPodcastEpisode) => {
+    setActiveEpisodeId(ep.id);
+    setPlaybackTime(0);
+    syncUrlParams({
+      episode: ep.id,
+      category: selectedCategory,
+      sort: sortBy,
+      audio: onlyWithAudio,
+      q: searchQuery,
+    });
+    studioSectionRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+    });
+  };
+
+  const handleSeekChapter = (seconds: number) => {
+    playerRef.current?.seekTo(seconds, true);
+    setPlaybackTime(seconds);
+  };
+
+  const handleSelectCategory = (category: PodcastCategoryFilter) => {
+    setSelectedCategory(category);
+    setPage(1);
+    syncUrlParams({
+      episode: activeEpisode?.id ?? activeEpisodeId,
+      category,
+      sort: sortBy,
+      audio: onlyWithAudio,
+      q: searchQuery,
+    });
+  };
+
+  const handleSortChange = (sort: PodcastSortKey) => {
+    setSortBy(sort);
+    setPage(1);
+    syncUrlParams({
+      episode: activeEpisode?.id ?? activeEpisodeId,
+      category: selectedCategory,
+      sort,
+      audio: onlyWithAudio,
+      q: searchQuery,
+    });
+  };
+
+  const handleToggleAudioOnly = () => {
+    const nextAudio = !onlyWithAudio;
+    setOnlyWithAudio(nextAudio);
+    setPage(1);
+    syncUrlParams({
+      episode: activeEpisode?.id ?? activeEpisodeId,
+      category: selectedCategory,
+      sort: sortBy,
+      audio: nextAudio,
+      q: searchQuery,
+    });
+  };
+
+  const handleSearchChange = (q: string) => {
+    setSearchQuery(q);
+    setPage(1);
+    syncUrlParams({
+      episode: activeEpisode?.id ?? activeEpisodeId,
+      category: selectedCategory,
+      sort: sortBy,
+      audio: onlyWithAudio,
+      q,
+    });
+  };
+
+  const handleResetFilters = () => {
+    setSelectedCategory("all");
+    setSortBy("newest");
+    setOnlyWithAudio(false);
+    setSearchQuery("");
+    setPage(1);
+    syncUrlParams({
+      episode: activeEpisode?.id ?? activeEpisodeId,
+      category: "all",
+      sort: "newest",
+      audio: false,
+      q: "",
+    });
+  };
+
+  const handleShareEpisode = async (ep: PublicPodcastEpisode) => {
+    if (typeof window === "undefined") return;
+    const url = `${window.location.origin}/podcast?episode=${encodeURIComponent(ep.id)}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast({
+        title: "Đã sao chép liên kết tập podcast",
+        description: `Tập #${ep.episodeNumber}: ${ep.title}`,
+        variant: "success",
+      });
+    } catch {
+      toast({
+        title: "Không thể truy cập clipboard",
+        description: "Vui lòng sao chép trực tiếp đường dẫn trên thanh địa chỉ.",
+        variant: "error",
+      });
+    }
+  };
+
+  const hasActiveFilters =
+    selectedCategory !== "all" ||
+    sortBy !== "newest" ||
+    onlyWithAudio ||
+    searchQuery.trim().length > 0;
+
+  if (loading) {
+    return <PodcastSkeleton />;
+  }
 
   return (
-    <div className="mx-auto max-w-7xl space-y-12 px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
+    <div className="mx-auto max-w-7xl space-y-10 px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
       {/* Header */}
       <div className="space-y-4">
         <Breadcrumb
@@ -89,234 +363,218 @@ export default function PodcastPage() {
         />
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
           <div>
-            <div className="inline-flex items-center gap-1.5 text-xs font-semibold tracking-wider text-accent uppercase">
-              <Headphones className="size-4" aria-hidden="true" />
+            <div className="inline-flex items-center gap-1.5 text-xs font-semibold tracking-wider text-primary uppercase">
+              <Headphones className="size-4 text-[#B8861E]" aria-hidden="true" />
               <span>Academic Audio Newsletter</span>
             </div>
             <h1 className="mt-1 font-heading text-3xl font-bold text-foreground sm:text-4xl">
-              Podcast học thuật & Bản tin âm thanh
+              Podcast học thuật &amp; Bản tin âm thanh
             </h1>
             <p className="mt-1.5 max-w-2xl text-sm text-muted-foreground">
-              Lắng nghe phân tích chuyên đề IELTS, hướng dẫn ngữ điệu học thuật và chia sẻ phương
-              pháp tự học hàng tuần từ ThS. Nguyễn Minh Anh.
+              Lắng nghe phân tích chuyên đề IELTS, hướng dẫn ngữ điệu học thuật
+              và chia sẻ phương pháp tự học{" "}
+              {host.name ? `từ ${host.name}.` : "cùng giáo viên hướng dẫn."}
             </p>
           </div>
           <Badge variant="warm" className="self-start sm:self-auto">
             <Sparkles className="size-3.5 text-primary" aria-hidden="true" />
-            Phát hành định kỳ Thứ Tư hàng tuần
+            <span>
+              {currentTerm || "Cập nhật trực tiếp"}
+              {stats.latestPublishedAt
+                ? ` · Tập mới: ${stats.latestPublishedAt}`
+                : ""}
+            </span>
           </Badge>
         </div>
+
+        {/* Summary Strip */}
+        {!error && episodes.length > 0 && (
+          <div className="grid gap-3 pt-2 sm:grid-cols-3">
+            <div className="flex items-center gap-3 rounded-2xl border border-border bg-card px-4 py-3 shadow-2xs">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-warm text-primary">
+                <Headphones className="size-5 text-[#B8861E]" aria-hidden="true" />
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">
+                  Tập đã xuất bản
+                </p>
+                <p className="font-heading text-lg font-bold text-foreground">
+                  {stats.totalEpisodes} tập
+                  <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                    ({stats.audioReadyCount} có tệp audio)
+                  </span>
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 rounded-2xl border border-border bg-card px-4 py-3 shadow-2xs">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-secondary text-primary">
+                <Clock className="size-5" aria-hidden="true" />
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">
+                  Tổng thời lượng nghe
+                </p>
+                <p className="font-heading text-lg font-bold text-foreground">
+                  {formatTotalListeningDuration(stats.totalDurationSeconds)}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 rounded-2xl border border-border bg-card px-4 py-3 shadow-2xs">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-highlight/25 text-primary">
+                <BookOpen className="size-5" aria-hidden="true" />
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">
+                  Từ vựng học thuật
+                </p>
+                <p className="font-heading text-lg font-bold text-foreground">
+                  {stats.totalVocabulary} mục tiêu biểu
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Featured / Active Episode Player & Show Notes */}
-      <section className="grid gap-8 lg:grid-cols-12">
-        <div className="lg:col-span-7">
-          <AudioPlayer key={activeEpisode.id} episode={activeEpisode} />
-        </div>
+      {/* Error State or Content */}
+      {error ? (
+        <EmptyState
+          title="Không thể tải Podcast học thuật"
+          description={error}
+          action={
+            <Button type="button" variant="outline" onClick={handleRetry}>
+              <RefreshCw className="size-4" aria-hidden="true" />
+              <span>Thử tải lại</span>
+            </Button>
+          }
+        />
+      ) : episodes.length === 0 || !activeEpisode ? (
+        <EmptyState
+          title="Chưa có tập Podcast công khai"
+          description="Các bản tin âm thanh và chuyên đề tự học sẽ hiển thị tại đây ngay khi giáo viên xuất bản."
+        />
+      ) : (
+        <>
+          {/* Studio Player + Interactive Show Notes */}
+          <section
+            ref={studioSectionRef}
+            aria-label="Trình phát Podcast và Show Notes tương tác"
+            className="grid gap-8 lg:grid-cols-12"
+          >
+            <div className="lg:col-span-7">
+              <AudioPlayer
+                key={activeEpisode.id}
+                playerRef={playerRef}
+                episode={activeEpisode}
+                hostName={host.name || "Giáo viên điều hành"}
+                hostAvatarUrl={host.avatarUrl || "/images/teacher-avatar.jpg"}
+                onTimeUpdate={setPlaybackTime}
+                onPrevEpisode={
+                  adjacentEpisodes.prev
+                    ? () => handleSelectEpisode(adjacentEpisodes.prev!)
+                    : null
+                }
+                onNextEpisode={
+                  adjacentEpisodes.next
+                    ? () => handleSelectEpisode(adjacentEpisodes.next!)
+                    : null
+                }
+                onShareEpisode={handleShareEpisode}
+              />
+            </div>
 
-        {/* Show Notes & Key Vocabulary of Active Episode */}
-        <div className="flex flex-col justify-between rounded-2xl border border-border bg-card p-6 shadow-xs lg:col-span-5">
-          <div className="space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <Badge variant="secondary">Show Notes · Tập #{activeEpisode.episodeNumber}</Badge>
+            <div className="lg:col-span-5">
+              <PodcastShowNotesPanel
+                episode={activeEpisode}
+                chapters={chapters}
+                activeChapterIndex={activeChapterIndex}
+                currentTime={playbackTime}
+                onSeekChapter={handleSeekChapter}
+              />
+            </div>
+          </section>
+
+          {/* Playlist & Episode Explorer */}
+          <section className="space-y-6">
+            <PodcastToolbar
+              selectedCategory={selectedCategory}
+              onSelectCategory={handleSelectCategory}
+              categoryCounts={categoryCounts}
+              sortBy={sortBy}
+              onSortChange={handleSortChange}
+              onlyWithAudio={onlyWithAudio}
+              onToggleAudioOnly={handleToggleAudioOnly}
+              audioReadyCount={stats.audioReadyCount}
+              searchQuery={searchQuery}
+              onSearchChange={handleSearchChange}
+              hasActiveFilters={hasActiveFilters}
+              onResetFilters={handleResetFilters}
+            />
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="inline-flex items-center gap-2 font-heading text-lg font-bold text-foreground">
+                <ListMusic className="size-5 text-primary" aria-hidden="true" />
+                <span>Danh sách phát ({filteredEpisodes.length} tập)</span>
+              </h2>
               <span className="text-xs text-muted-foreground">
-                {activeEpisode.publishedAt}
+                Nhấn vào tập bất kỳ để chuyển bài phát trên trình nghe
               </span>
             </div>
 
-            <h2 className="font-heading text-lg font-bold text-foreground">
-              Mốc thời gian & Nội dung chính
-            </h2>
-
-            <ul className="space-y-2.5 text-xs text-foreground/90">
-              {activeEpisode.showNotes.map((note) => (
-                <li
-                  key={note}
-                  className="flex items-start gap-2.5 rounded-xl bg-background p-3"
-                >
-                  <Clock
-                    className="mt-0.5 size-3.5 shrink-0 text-accent"
-                    aria-hidden="true"
-                  />
-                  <span>{note}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div className="mt-6 border-t border-border pt-4">
-            <div className="mb-2.5 flex items-center gap-1.5 text-xs font-semibold text-primary">
-              <BookOpen className="size-3.5 text-accent" aria-hidden="true" />
-              <span>Từ vựng học thuật trọng tâm trong tập này</span>
-            </div>
-            <div className="space-y-2">
-              {activeEpisode.vocabularyHighlights.map((vocab) => (
-                <div
-                  key={vocab.term}
-                  className="flex flex-wrap items-baseline justify-between gap-2 rounded-xl border border-border/70 bg-warm/35 px-3 py-2 text-xs"
-                >
-                  <div>
-                    <strong className="font-semibold text-primary">{vocab.term}</strong>{" "}
-                    <span className="font-mono text-[11px] text-muted-foreground">
-                      {vocab.ipa}
-                    </span>
-                  </div>
-                  <span className="text-foreground/85">{vocab.meaning}</span>
+            {filteredEpisodes.length === 0 ? (
+              <EmptyState
+                title="Không tìm thấy tập Podcast phù hợp"
+                description="Thử chọn danh mục khác hoặc xóa bộ lọc tìm kiếm hiện tại."
+                action={
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleResetFilters}
+                  >
+                    Hiển thị tất cả các tập
+                  </Button>
+                }
+              />
+            ) : (
+              <div className="space-y-6">
+                <div className="grid gap-4 md:grid-cols-2">
+                  {paginatedEpisodes.map((ep) => (
+                    <PodcastEpisodeCard
+                      key={ep.id}
+                      episode={ep}
+                      isSelected={ep.id === activeEpisode.id}
+                      onSelect={handleSelectEpisode}
+                      onShare={handleShareEpisode}
+                    />
+                  ))}
                 </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </section>
 
-      {/* Playlist & Episode Explorer */}
-      <section className="space-y-6">
-        <div className="flex flex-col justify-between gap-4 rounded-2xl border border-border bg-card p-4 sm:flex-row sm:items-center">
-          <div
-            className="flex flex-wrap items-center gap-1.5"
-            role="tablist"
-            aria-label="Lọc tập podcast theo chủ đề"
-          >
-            {PODCAST_CATEGORIES.map((cat) => {
-              const active = selectedCategory === cat.value;
-              return (
-                <button
-                  key={cat.value}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => setSelectedCategory(cat.value)}
-                  className={cn(
-                    "rounded-xl px-3.5 py-1.5 text-xs font-medium transition-colors",
-                    active
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                >
-                  {cat.label}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="relative w-full sm:w-72">
-            <Search
-              className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
-              aria-hidden="true"
-            />
-            <Input
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Tìm tên tập, từ vựng học thuật..."
-              aria-label="Tìm kiếm tập podcast"
-              className="pl-9"
-            />
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between">
-          <h2 className="inline-flex items-center gap-2 font-heading text-lg font-bold text-foreground">
-            <ListMusic className="size-5 text-primary" aria-hidden="true" />
-            Danh sách phát ({filteredEpisodes.length} tập)
-          </h2>
-          <span className="text-xs text-muted-foreground">
-            Nhấn vào tập bất kỳ để chuyển bài phát trên trình nghe
-          </span>
-        </div>
-
-        {filteredEpisodes.length === 0 ? (
-          <EmptyState
-            title="Không tìm thấy tập Podcast phù hợp"
-            description="Thử chọn danh mục khác hoặc xóa từ khóa tìm kiếm."
-            action={
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setSelectedCategory("all");
-                  setSearchQuery("");
-                }}
-              >
-                Hiển thị tất cả các tập
-              </Button>
-            }
-          />
-        ) : (
-          <div className="grid gap-4 md:grid-cols-2">
-            {filteredEpisodes.map((ep) => {
-              const isSelected = ep.id === activeEpisode.id;
-              return (
-                <div
-                  key={ep.id}
-                  onClick={() => setActiveEpisodeId(ep.id)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      setActiveEpisodeId(ep.id);
-                    }
+                <PaginationBar
+                  page={currentPage}
+                  totalPages={totalPages}
+                  totalItems={filteredEpisodes.length}
+                  pageSize={pageSize}
+                  onPageChange={setPage}
+                  onPageSizeChange={(sz) => {
+                    setPageSize(sz);
+                    setPage(1);
                   }}
-                  className={cn(
-                    "group flex cursor-pointer flex-col justify-between rounded-2xl border p-5 transition-all outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
-                    isSelected
-                      ? "border-primary bg-warm/45 shadow-xs"
-                      : "border-border bg-card hover:border-accent/50",
-                  )}
-                >
-                  <div>
-                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                      <div className="flex items-center gap-2">
-                        <Badge variant={isSelected ? "default" : "secondary"}>
-                          Tập #{ep.episodeNumber}
-                        </Badge>
-                        <Badge variant="outline">{ep.categoryLabel}</Badge>
-                      </div>
-                      <span className="inline-flex items-center gap-1 font-mono text-muted-foreground">
-                        <Clock className="size-3.5" aria-hidden="true" />
-                        {ep.durationLabel}
-                      </span>
-                    </div>
-
-                    <h3 className="mt-3 font-heading text-base font-bold text-foreground group-hover:text-primary">
-                      {ep.title}
-                    </h3>
-                    <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                      {ep.summary}
-                    </p>
-                  </div>
-
-                  <div className="mt-5 flex items-center justify-between border-t border-border pt-3.5 text-xs">
-                    <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-                      <Calendar className="size-3.5" aria-hidden="true" />
-                      {ep.publishedAt}
-                    </span>
-                    <span
-                      className={cn(
-                        "inline-flex items-center gap-1.5 font-semibold",
-                        isSelected ? "text-primary" : "text-accent group-hover:text-primary",
-                      )}
-                    >
-                      {isSelected ? (
-                        <>
-                          <Volume2 className="size-3.5" aria-hidden="true" />
-                          Đang chọn trên trình phát
-                        </>
-                      ) : (
-                        <>
-                          <Play className="size-3.5" aria-hidden="true" />
-                          Nghe tập này
-                        </>
-                      )}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </section>
+                  pageSizeOptions={[4, 6, 10, 20]}
+                />
+              </div>
+            )}
+          </section>
+        </>
+      )}
     </div>
+  );
+}
+
+export default function PodcastPage() {
+  return (
+    <React.Suspense fallback={<PodcastSkeleton />}>
+      <PodcastPageContent />
+    </React.Suspense>
   );
 }

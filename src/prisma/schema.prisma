@@ -35,6 +35,7 @@ enum AnnouncementCategory {
 enum ContentStatus {
   published
   draft
+  pending_review
 }
 
 enum SessionStatus {
@@ -97,6 +98,56 @@ enum StudentStatus {
   archived
 }
 
+enum ClassroomStatus {
+  upcoming
+  active
+  completed
+  archived
+}
+
+enum ScheduleExceptionType {
+  canceled
+  rescheduled
+  makeup
+}
+
+enum JournalStatus {
+  completed
+  draft
+  not_started @map("not-started")
+}
+
+enum SessionCompletionResult {
+  completed
+  partial
+  not_completed @map("not-completed")
+}
+
+enum HomeworkStatus {
+  submitted
+  not_submitted @map("not-submitted")
+  exempt
+  unrecorded
+}
+
+enum LearningStatus {
+  good
+  satisfactory
+  needs_support @map("needs-support")
+  unrecorded
+}
+
+enum GradePublishStatus {
+  published
+  draft
+}
+
+enum AnalyticsAlertAckStatus {
+  active
+  acknowledged
+  resolved
+}
+
 enum UserRole {
   admin
   student
@@ -126,24 +177,41 @@ model Profile {
 // -----------------------------------------------------------------------------
 
 model TeacherSetting {
-  id                     String   @id @default("default")
-  name                   String
-  title                  String
-  credentials            String[]
-  slogan                 String
-  shortBio               String
-  philosophy             String
-  experienceYears        Int      @default(9)
-  totalStudents          Int      @default(420)
-  bandAchievementRate    String
-  email                  String
-  officeHours            String
-  location               String
-  currentTerm            String   @default("Học kỳ I · Năm học 2026–2027")
-  defaultPortalPin       String   @default("123456")
-  autoNotifyParents      Boolean  @default(true)
-  presignedExpirySeconds Int      @default(900)
-  updatedAt              DateTime @updatedAt
+  id                            String   @id @default("default")
+  name                          String
+  title                         String
+  credentials                   String[]
+  slogan                        String
+  shortBio                      String
+  philosophy                    String
+  experienceYears               Int      @default(9)
+  totalStudents                 Int      @default(420)
+  bandAchievementRate           String
+  email                         String
+  avatarUrl                     String?  @map("avatar_url")
+  socialsJson                   Json?    @map("socials_json")
+  officeHours                   String
+  location                      String
+  currentTerm                   String   @default("Học kỳ I · Năm học 2026–2027")
+  defaultPortalPin              String   @default("123456")
+  autoNotifyParents             Boolean  @default(true)
+  presignedExpirySeconds        Int      @default(900)
+  lowAttendanceThresholdPercent Int      @default(90) @map("low_attendance_threshold_percent")
+  tuitionReminderDaysBefore     Int      @default(7) @map("tuition_reminder_days_before")
+  requirePortalVerification     Boolean  @default(true) @map("require_portal_verification")
+  updatedAt                     DateTime @updatedAt
+}
+
+model SettingsAuditLog {
+  id            String   @id @default(cuid())
+  action        String
+  actorId       String   @map("actor_id")
+  changedFields String[] @default([]) @map("changed_fields")
+  summary       String
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([action, createdAt])
+  @@map("settings_audit_logs")
 }
 
 // -----------------------------------------------------------------------------
@@ -151,23 +219,91 @@ model TeacherSetting {
 // -----------------------------------------------------------------------------
 
 model Classroom {
-  id              String         @id @default(cuid())
-  code            String         @unique
-  name            String
-  level           String
-  targetBand      String
-  scheduleSummary String
-  room            String
-  enrolled        Int            @default(0)
-  capacity        Int            @default(15)
-  attendanceRate  Float          @default(100)
-  averageScore    Float          @default(7.0)
-  currentModule   String
-  status          String         @default("active")
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
-  students        Student[]
-  sessions        ClassSession[]
+  id               String           @id @default(cuid())
+  code             String
+  name             String
+  level            String
+  targetBand       String
+  scheduleSummary  String
+  room             String
+  enrolled         Int              @default(0)
+  capacity         Int              @default(15)
+  attendanceRate   Float            @default(100)
+  averageScore     Float            @default(7.0)
+  currentModule    String
+  startDate        String?
+  expectedEndDate  String?
+  completedAt      String?
+  totalWeeks       Int              @default(12)
+  currentWeekIndex Int              @default(1)
+  tuitionDueDate   String?          @default("2026-11-20")
+  status           ClassroomStatus  @default(active)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  students               Student[]
+  sessions               ClassSession[]
+  curriculumWeeks        CurriculumWeek[]
+  scheduleExceptions     ScheduleException[]
+  teachingJournalEntries TeachingJournalEntry[]
+  attendanceRecords      AttendanceRecord[]
+  gradeRecords           GradeRecord[]
+  assessmentCatalogs     AssessmentCatalog[]
+
+  @@index([code])
+}
+
+model CurriculumWeek {
+  id                    String                     @id @default(cuid())
+  classroomId           String
+  classroom             Classroom                  @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  weekNumber            Int
+  title                 String
+  focus                 String?
+  focusSkill            String?
+  notes                 String?
+  status                String?                    @default("not-started")
+  scheduledDate         String?
+  completedDate         String?
+  teacherName           String?
+  plannedSessions       Int?                       @default(2)
+  isAssessmentMilestone Boolean                    @default(false)
+  assessmentTitle       String?
+  lessonObjectives      String[]                   @default([])
+  homework              String?
+  homeworkDueDate       String?
+  materialsCount        Int                        @default(0)
+  attachments           CurriculumWeekAttachment[]
+
+  @@unique([classroomId, weekNumber])
+}
+
+model CurriculumWeekAttachment {
+  id            String         @id @default(cuid())
+  attachmentKey String?        @map("attachment_key")
+  weekId        String
+  week          CurriculumWeek @relation(fields: [weekId], references: [id], onDelete: Cascade)
+  title         String
+  type          String         @default("pdf")
+  url           String
+  storedFileId  String?        @map("stored_file_id")
+  storedFile    StoredFile?    @relation(fields: [storedFileId], references: [id], onDelete: SetNull)
+  sizeLabel     String?
+  sizeBytes     Int?
+  visibility    FileVisibility @default(public)
+  uploadedAt    String
+}
+
+model CurriculumTemplate {
+  id          String   @id @default(cuid())
+  name        String
+  level       String
+  targetBand  String   @default("") @map("target_band")
+  description String?
+  totalWeeks  Int      @default(12)
+  isCustom    Boolean  @default(true)
+  weeksJson   String   @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 model ClassSession {
@@ -185,13 +321,37 @@ model ClassSession {
   topic         String
   enrolledCount Int                @default(12)
   capacity      Int                @default(15)
-  status        SessionStatus      @default(upcoming)
-  hasConflict   Boolean            @default(false)
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
-  attendances   AttendanceRecord[]
+  status             SessionStatus       @default(upcoming)
+  hasConflict        Boolean             @default(false)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  attendances        AttendanceRecord[]
+  scheduleExceptions ScheduleException[]
 
   @@index([dayOfWeek, startTime])
+}
+
+model ScheduleException {
+  id                String                @id @default(cuid())
+  type              ScheduleExceptionType
+  originalSessionId String?               @map("original_session_id")
+  originalSession   ClassSession?         @relation(fields: [originalSessionId], references: [id], onDelete: SetNull)
+  classroomId       String                @map("classroom_id")
+  classroom         Classroom             @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  originalDate      String                @map("original_date")
+  newDate           String?               @map("new_date")
+  startTime         String                @map("start_time")
+  endTime           String                @map("end_time")
+  room              String
+  topic             String
+  reason            String
+  announcementId         String?                @map("announcement_id")
+  createdAt              DateTime               @default(now()) @map("created_at")
+  teachingJournalEntries TeachingJournalEntry[]
+
+  @@index([classroomId, originalDate])
+  @@index([newDate])
+  @@map("schedule_exceptions")
 }
 
 // -----------------------------------------------------------------------------
@@ -213,11 +373,21 @@ model Student {
   attendanceRate      Float              @default(100)
   averageScore        Float              @default(7.0)
   targetGoal          String
+  entryBand           Float?
   tuitionStatus       TuitionStatus      @default(paid)
   tuitionPeriod       String
   tuitionAmount       String
+  tuitionDueDate      String?            @default("2026-11-20")
   parentRelation      String
   parentContactMasked String
+  parentName          String?
+  parentPhone         String?
+  parentEmail         String?
+  parentNote          String?
+  privateNote         String?
+  leaveStartDate      String?
+  leaveReturnDate     String?
+  leaveReason         String?
   status              StudentStatus      @default(active)
   recentComment       String
   deletedAt           DateTime?
@@ -227,6 +397,9 @@ model Student {
   attendanceHistory   AttendanceRecord[]
   classTransfers      ClassTransferHistory[]
   gradeChangeHistory  GradeChangeHistory[]
+  tuitionPayments     TuitionPayment[]
+  communicationLogs   CommunicationLog[]
+  sessionEvaluations  SessionStudentEvaluation[]
 
   @@index([classroomId])
   @@index([tuitionStatus])
@@ -234,9 +407,11 @@ model Student {
 }
 
 model GradeRecord {
-  id              String   @id @default(cuid())
+  id              String               @id @default(cuid())
   studentId       String
-  student         Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  student         Student              @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  classroomId     String?              @map("classroom_id")
+  classroom       Classroom?           @relation(fields: [classroomId], references: [id], onDelete: SetNull)
   assessmentTitle String
   date            String
   listening       Float
@@ -245,26 +420,91 @@ model GradeRecord {
   speaking        Float
   overall         Float
   comment         String
+  privateNote     String?              @map("private_note")
+  status          GradePublishStatus   @default(published)
   createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @default(now()) @updatedAt
   history         GradeChangeHistory[]
 
   @@index([studentId])
   @@index([assessmentTitle])
+  @@index([classroomId, assessmentTitle])
+  @@index([status])
+}
+
+model AssessmentCatalog {
+  id          String     @id @default(cuid())
+  title       String     @unique
+  category    String     @default("mock-test")
+  examDate    String?    @map("exam_date")
+  classroomId String?    @map("classroom_id")
+  classroom   Classroom? @relation(fields: [classroomId], references: [id], onDelete: SetNull)
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  @@index([classroomId])
+  @@map("assessment_catalogs")
 }
 
 model AttendanceRecord {
-  id          String           @id @default(cuid())
-  studentId   String
-  student     Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  sessionId   String?
-  session     ClassSession?    @relation(fields: [sessionId], references: [id], onDelete: SetNull)
-  date        String
-  sessionName String
-  status      AttendanceStatus @default(present)
-  note        String?
-  createdAt   DateTime         @default(now())
+  id                     String                @id @default(cuid())
+  studentId              String
+  student                Student               @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  classroomId            String?               @map("classroom_id")
+  classroom              Classroom?            @relation(fields: [classroomId], references: [id], onDelete: SetNull)
+  sessionId              String?
+  session                ClassSession?         @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  teachingJournalEntryId String?               @map("teaching_journal_entry_id")
+  teachingJournalEntry   TeachingJournalEntry? @relation(fields: [teachingJournalEntryId], references: [id], onDelete: SetNull)
+  date                   String
+  sessionName            String
+  status                 AttendanceStatus      @default(present)
+  note                   String?
+  recordedBy             String?               @map("recorded_by")
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @default(now()) @updatedAt
 
   @@index([studentId, date])
+  @@index([classroomId, date])
+  @@index([teachingJournalEntryId])
+}
+
+model TuitionPayment {
+  id             String   @id @default(cuid())
+  studentId      String
+  student        Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  period         String
+  baseAmount     Int
+  discountAmount Int      @default(0)
+  paidAmount     Int      @default(0)
+  dueDate        String
+  paidAt         String?
+  method         String?
+  status         String   @default("due-soon")
+  note           String?
+  receiptCode    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([studentId])
+  @@index([status])
+}
+
+model CommunicationLog {
+  id               String   @id @default(cuid())
+  studentId        String
+  student          Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  date             String
+  channel          String   @default("zalo")
+  category         String   @default("general")
+  summary          String
+  parentResponse   String?
+  nextFollowUpDate String?
+  loggedBy         String   @default("ThS. Nguyễn Minh Anh")
+  createdAt        DateTime @default(now())
+
+  @@index([studentId])
+  @@index([date])
 }
 
 // -----------------------------------------------------------------------------
@@ -272,14 +512,16 @@ model AttendanceRecord {
 // -----------------------------------------------------------------------------
 
 model ClassTransferHistory {
-  id         String    @id @default(cuid())
-  studentId  String
-  student    Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  oldClassId String
-  newClassId String
-  changedBy  String    @default("admin")
-  changedAt  DateTime  @default(now())
-  reason     String?
+  id           String    @id @default(cuid())
+  studentId    String
+  student      Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  oldClassId   String
+  oldClassName String    @default("") @map("old_class_name")
+  newClassId   String
+  newClassName String    @default("") @map("new_class_name")
+  changedBy    String    @default("admin")
+  changedAt    DateTime  @default(now())
+  reason       String?
 
   @@index([studentId])
   @@index([changedAt])
@@ -346,6 +588,7 @@ model AnnouncementAttachment {
   name           String
   size           String
   type           String       @default("PDF")
+  url            String?
   objectKey      String?
   downloadCount  Int          @default(0)
 }
@@ -359,6 +602,7 @@ model PodcastEpisode {
   category             PodcastCategory @default(weekly_digest)
   categoryLabel        String
   audioKey             String?
+  audioUrl             String?
   thumbnailKey         String?
   durationSeconds      Int             @default(720)
   durationLabel        String
@@ -373,6 +617,8 @@ model PodcastEpisode {
 
 model HallOfFameEntry {
   id                 String      @id @default(cuid())
+  studentId          String?
+  classId            String?
   displayName        String
   avatarInitials     String
   className          String
@@ -402,6 +648,13 @@ model StudentProject {
   featuredMetric String
   accentTheme    String        @default("navy")
   status         ContentStatus @default(published)
+  posterUrl      String?
+  posterPublicId String?
+  documentUrl    String?
+  documentName   String?
+  documentSize   String?
+  videoUrl       String?
+  tags           String[]      @default([])
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 }
@@ -445,6 +698,8 @@ model ResourceFile {
   visibility         FileVisibility      @default(public)
   category           String              @default("general")
   ownerId            String?
+  originalName       String?
+  storedName         String?
   previewSummary     String[]
   deletedAt          DateTime?
 
@@ -465,15 +720,150 @@ model StoredFile {
   cloudinaryPublicId String?             @map("cloudinary_public_id")
   publicUrl          String?             @map("public_url")
   isPublic           Boolean             @default(true) @map("is_public")
-  ownerId            String?             @map("owner_id")
-  category           String              @default("general")
-  createdAt          DateTime            @default(now()) @map("created_at")
-  updatedAt          DateTime            @updatedAt @map("updated_at")
-  deletedAt          DateTime?           @map("deleted_at")
+  ownerId               String?                    @map("owner_id")
+  category              String                     @default("general")
+  referencedBy          String[]                   @default([]) @map("referenced_by")
+  createdAt             DateTime                   @default(now()) @map("created_at")
+  updatedAt             DateTime                   @updatedAt @map("updated_at")
+  deletedAt             DateTime?                  @map("deleted_at")
+  curriculumAttachments CurriculumWeekAttachment[]
+  sessionAttachments    SessionAttachmentFile[]
 
   @@index([provider, category])
   @@index([isPublic, deletedAt])
   @@index([cloudinaryPublicId])
   @@index([bucketName, storagePath])
   @@map("stored_files")
+}
+
+// -----------------------------------------------------------------------------
+//  7. TEACHING JOURNAL, REVISION LOGS & STUDENT SESSION EVALUATIONS
+// -----------------------------------------------------------------------------
+
+model TeachingJournalEntry {
+  id                  String                     @id @default(cuid())
+  classroomId         String                     @map("classroom_id")
+  classroom           Classroom                  @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  scheduleExceptionId String?                    @map("schedule_exception_id")
+  scheduleException   ScheduleException?         @relation(fields: [scheduleExceptionId], references: [id], onDelete: SetNull)
+  date                String
+  dayLabel            String                     @map("day_label")
+  startTime           String                     @map("start_time")
+  endTime             String                     @map("end_time")
+  room                String
+  weekNumber          Int                        @default(1) @map("week_number")
+  topic               String
+  objectives          String                     @default("")
+  completionResult    SessionCompletionResult    @default(not_completed) @map("completion_result")
+  generalNotes        String                     @default("") @map("general_notes")
+  privateNotes        String                     @default("") @map("private_notes")
+  homework            String                     @default("")
+  nextSessionPlan     String                     @default("") @map("next_session_plan")
+  journalStatus       JournalStatus              @default(not_started) @map("journal_status")
+  createdAt           DateTime                   @default(now()) @map("created_at")
+  updatedAt           DateTime                   @updatedAt @map("updated_at")
+  studentEvaluations  SessionStudentEvaluation[]
+  revisions           JournalRevisionLog[]
+  attachments         SessionAttachmentFile[]
+  attendanceRecords   AttendanceRecord[]
+
+  @@unique([classroomId, date, startTime])
+  @@index([classroomId, date])
+  @@index([journalStatus])
+  @@map("teaching_journal_entries")
+}
+
+model SessionStudentEvaluation {
+  id              String               @id @default(cuid())
+  entryId         String               @map("entry_id")
+  entry           TeachingJournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  studentId       String               @map("student_id")
+  student         Student              @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  attendance      AttendanceStatus     @default(present)
+  homeworkStatus  HomeworkStatus       @default(unrecorded) @map("homework_status")
+  learningStatus  LearningStatus       @default(unrecorded) @map("learning_status")
+  skill           String               @default("General")
+  score           Float?
+  teacherFeedback String               @default("") @map("teacher_feedback")
+  followUp        String               @default("") @map("follow_up")
+
+  @@unique([entryId, studentId])
+  @@index([studentId])
+  @@map("session_student_evaluations")
+}
+
+model JournalRevisionLog {
+  id                       String                  @id @default(cuid())
+  entryId                  String                  @map("entry_id")
+  entry                    TeachingJournalEntry    @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  summary                  String
+  previousTopic            String                  @map("previous_topic")
+  previousObjectives       String?                 @map("previous_objectives")
+  previousNotes            String                  @map("previous_notes")
+  previousHomework         String?                 @map("previous_homework")
+  previousNextSessionPlan  String?                 @map("previous_next_session_plan")
+  previousCompletionResult SessionCompletionResult @map("previous_completion_result")
+  createdAt                DateTime                @default(now()) @map("created_at")
+
+  @@index([entryId, createdAt])
+  @@map("journal_revision_logs")
+}
+
+model SessionAttachmentFile {
+  id           String               @id @default(cuid())
+  entryId      String               @map("entry_id")
+  entry        TeachingJournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  storedFileId String?              @map("stored_file_id")
+  storedFile   StoredFile?          @relation(fields: [storedFileId], references: [id], onDelete: SetNull)
+  name         String
+  fileType     String               @default("PDF") @map("file_type")
+  size         String               @default("1.0 MB")
+  url          String?
+  uploadedAt   DateTime             @default(now()) @map("uploaded_at")
+
+  @@index([entryId])
+  @@index([storedFileId])
+  @@map("session_attachment_files")
+}
+
+model AnalyticsAlertAck {
+  id        String                  @id @default(cuid())
+  alertId   String                  @unique @map("alert_id")
+  status    AnalyticsAlertAckStatus @default(active)
+  note      String?
+  updatedBy String                  @default("admin") @map("updated_by")
+  createdAt DateTime                @default(now()) @map("created_at")
+  updatedAt DateTime                @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@map("analytics_alert_acks")
+}
+
+model StorageAuditLog {
+  id         String              @id @default(cuid())
+  action     String
+  provider   StorageProviderType
+  actorId    String              @map("actor_id")
+  targetId   String              @map("target_id")
+  targetPath String              @map("target_path")
+  status     String
+  detail     String
+  createdAt  DateTime            @default(now()) @map("created_at")
+
+  @@index([provider, action])
+  @@index([createdAt])
+  @@map("storage_audit_logs")
+}
+
+model OrphanedStorageFile {
+  id                 String              @id @default(cuid())
+  provider           StorageProviderType
+  bucketName         String?             @map("bucket_name")
+  storagePath        String              @map("storage_path")
+  cloudinaryPublicId String?             @map("cloudinary_public_id")
+  reason             String
+  createdAt          DateTime            @default(now()) @map("created_at")
+
+  @@index([provider, createdAt])
+  @@map("orphaned_storage_files")
 }

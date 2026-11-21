@@ -1,95 +1,406 @@
 "use client";
 
 import * as React from "react";
+import { useSearchParams } from "next/navigation";
 import {
-  Award,
-  BookOpen,
-  Calendar,
-  ExternalLink,
-  Eye,
+  FileText,
   FolderGit2,
   Layers,
-  Search,
+  RefreshCw,
   Sparkles,
   Users,
 } from "lucide-react";
 import {
-  STUDENT_PROJECTS_DATA,
-  type StudentProjectItem,
-} from "@/services/classroom-data";
+  computeShowcaseStats,
+  countProjectsByCategory,
+  extractProjectClasses,
+  filterAndSortProjects,
+  getAdjacentProjects,
+  type PublicStudentProject,
+  type ShowcaseCategoryFilter,
+  type ShowcaseMediaFilter,
+  type ShowcaseSortKey,
+  type ViewerShowcaseMentor,
+  type ViewerShowcasePayload,
+} from "@/services/showcase-helpers";
 import { apiRequest } from "@/lib/api-client";
+import { ShowcaseDetailModal } from "@/components/viewer/showcase/showcase-detail-modal";
+import { ShowcaseProjectCard } from "@/components/viewer/showcase/showcase-project-card";
+import { ShowcaseToolbar } from "@/components/viewer/showcase/showcase-toolbar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ModalDialog } from "@/components/ui/dialog";
-import { Breadcrumb, EmptyState } from "@/components/ui/feedback";
-import { Input } from "@/components/ui/input";
+import {
+  Breadcrumb,
+  EmptyState,
+  PaginationBar,
+  Skeleton,
+} from "@/components/ui/feedback";
 import { useToast } from "@/components/ui/toast";
-import { cn } from "@/lib/utils";
 
-export const PROJECT_CATEGORY_LABELS: Record<string, string> = {
-  "Research Poster": "Poster Nghiên Cứu",
-  "Debate Portfolio": "Hồ Sơ Tranh Biện",
-  "Video Presentation": "Video Thuyết Trình",
-  "Academic Essay": "Bài Luận Học Thuật",
-};
+const VALID_CATEGORIES = new Set<string>([
+  "all",
+  "Research Poster",
+  "Debate Portfolio",
+  "Video Presentation",
+  "Academic Essay",
+]);
 
-const PROJECT_CATEGORIES: {
-  value: "all" | StudentProjectItem["category"];
-  label: string;
-}[] = [
-  { value: "all", label: "Tất cả thể loại" },
-  { value: "Research Poster", label: "Poster Nghiên Cứu" },
-  { value: "Debate Portfolio", label: "Hồ Sơ Tranh Biện" },
-  { value: "Video Presentation", label: "Video Thuyết Trình" },
-  { value: "Academic Essay", label: "Bài Luận Học Thuật" },
-];
+const VALID_MEDIA = new Set<string>(["all", "video", "pdf"]);
+const VALID_SORTS = new Set<string>(["newest", "oldest", "title_asc"]);
 
-export default function ShowcasePage() {
-  const { toast } = useToast();
-  const [projects, setProjects] = React.useState<StudentProjectItem[]>(
-    STUDENT_PROJECTS_DATA,
+function parseCategoryParam(raw: string | null): ShowcaseCategoryFilter {
+  if (raw && VALID_CATEGORIES.has(raw)) {
+    return raw as ShowcaseCategoryFilter;
+  }
+  return "all";
+}
+
+function parseMediaParam(raw: string | null): ShowcaseMediaFilter {
+  if (raw && VALID_MEDIA.has(raw)) {
+    return raw as ShowcaseMediaFilter;
+  }
+  return "all";
+}
+
+function parseSortParam(raw: string | null): ShowcaseSortKey {
+  if (raw && VALID_SORTS.has(raw)) {
+    return raw as ShowcaseSortKey;
+  }
+  return "newest";
+}
+
+function ShowcaseSkeleton() {
+  return (
+    <div className="mx-auto max-w-7xl space-y-10 px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
+      <div className="space-y-3">
+        <Skeleton className="h-4 w-48" />
+        <Skeleton className="h-10 w-96 max-w-full" />
+        <Skeleton className="h-4 w-120 max-w-full" />
+      </div>
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Skeleton className="h-20 rounded-2xl" />
+        <Skeleton className="h-20 rounded-2xl" />
+        <Skeleton className="h-20 rounded-2xl" />
+      </div>
+      <Skeleton className="h-28 rounded-2xl" />
+      <div className="grid gap-6 md:grid-cols-2">
+        <Skeleton className="h-96 rounded-2xl" />
+        <Skeleton className="h-96 rounded-2xl" />
+      </div>
+    </div>
   );
-  const [selectedCategory, setSelectedCategory] = React.useState<
-    "all" | StudentProjectItem["category"]
-  >("all");
-  const [selectedClass, setSelectedClass] = React.useState<string>("all");
-  const [searchQuery, setSearchQuery] = React.useState("");
-  const [previewProject, setPreviewProject] =
-    React.useState<StudentProjectItem | null>(null);
+}
+
+function ShowcasePageContent() {
+  const searchParams = useSearchParams();
+  const { toast } = useToast();
+
+  const [projects, setProjects] = React.useState<PublicStudentProject[]>([]);
+  const [mentor, setMentor] = React.useState<ViewerShowcaseMentor>({
+    name: "",
+    title: "",
+  });
+  const [currentTerm, setCurrentTerm] = React.useState("");
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = React.useState(0);
+
+  const [selectedCategory, setSelectedCategory] =
+    React.useState<ShowcaseCategoryFilter>(() =>
+      parseCategoryParam(searchParams.get("category")),
+    );
+  const [selectedClass, setSelectedClass] = React.useState<string>(
+    () => searchParams.get("class") ?? "all",
+  );
+  const [selectedTag, setSelectedTag] = React.useState<string>(
+    () => searchParams.get("tag") ?? "all",
+  );
+  const [mediaFilter, setMediaFilter] = React.useState<ShowcaseMediaFilter>(
+    () => parseMediaParam(searchParams.get("media")),
+  );
+  const [sortBy, setSortBy] = React.useState<ShowcaseSortKey>(() =>
+    parseSortParam(searchParams.get("sort")),
+  );
+  const [searchQuery, setSearchQuery] = React.useState<string>(
+    () => searchParams.get("q") ?? "",
+  );
+  const [previewProjectId, setPreviewProjectId] = React.useState<string | null>(
+    () => searchParams.get("project"),
+  );
+
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(4);
 
   React.useEffect(() => {
-    apiRequest<StudentProjectItem[]>("/api/viewer/showcase")
-      .then(setProjects)
-      .catch(() => {});
-  }, []);
+    let active = true;
+    apiRequest<ViewerShowcasePayload>("/api/viewer/showcase")
+      .then((res) => {
+        if (!active) return;
+        setProjects(Array.isArray(res?.items) ? res.items : []);
+        setMentor(res?.mentor ?? { name: "", title: "" });
+        setCurrentTerm(res?.currentTerm ?? "");
+        setError(null);
+      })
+      .catch(() => {
+        if (!active) return;
+        setError("Không thể tải Thư viện dự án học sinh. Vui lòng thử lại.");
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+      });
 
-  const classOptions = React.useMemo(() => {
-    const unique = Array.from(new Set(projects.map((p) => p.className)));
-    return ["all", ...unique];
-  }, [projects]);
+    return () => {
+      active = false;
+    };
+  }, [reloadNonce]);
 
-  const filteredProjects = React.useMemo(() => {
-    return projects.filter((p) => {
-      const matchesCategory =
-        selectedCategory === "all" || p.category === selectedCategory;
-      const matchesClass =
-        selectedClass === "all" || p.className === selectedClass;
-      const q = searchQuery.trim().toLowerCase();
-      const matchesSearch =
-        !q ||
-        p.title.toLowerCase().includes(q) ||
-        p.studentOrTeam.toLowerCase().includes(q) ||
-        p.summary.toLowerCase().includes(q);
-      return matchesCategory && matchesClass && matchesSearch;
-    });
-  }, [projects, selectedCategory, selectedClass, searchQuery]);
-
-  const themeBannerStyles: Record<StudentProjectItem["accentTheme"], string> = {
-    navy: "bg-primary text-primary-foreground",
-    blue: "bg-accent text-accent-foreground",
-    coral: "bg-highlight text-highlight-foreground",
-    cream: "bg-warm text-warm-foreground border-b border-border",
+  const syncUrlParams = (next: {
+    category: ShowcaseCategoryFilter;
+    cls: string;
+    tag: string;
+    media: ShowcaseMediaFilter;
+    sort: ShowcaseSortKey;
+    q: string;
+    project: string | null;
+  }) => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams();
+    if (next.category !== "all") params.set("category", next.category);
+    if (next.cls !== "all") params.set("class", next.cls);
+    if (next.tag !== "all") params.set("tag", next.tag);
+    if (next.media !== "all") params.set("media", next.media);
+    if (next.sort !== "newest") params.set("sort", next.sort);
+    if (next.q.trim()) params.set("q", next.q.trim());
+    if (next.project) params.set("project", next.project);
+    const qs = params.toString();
+    const targetUrl = qs ? `/showcase?${qs}` : "/showcase";
+    window.history.replaceState(null, "", targetUrl);
   };
+
+  const stats = React.useMemo(
+    () => computeShowcaseStats(projects),
+    [projects],
+  );
+  const categoryCounts = React.useMemo(
+    () => countProjectsByCategory(projects),
+    [projects],
+  );
+  const availableClasses = React.useMemo(
+    () => extractProjectClasses(projects),
+    [projects],
+  );
+
+  const filteredProjects = React.useMemo(
+    () =>
+      filterAndSortProjects(projects, {
+        category: selectedCategory,
+        className: selectedClass,
+        tag: selectedTag,
+        media: mediaFilter,
+        search: searchQuery,
+        sortBy,
+      }),
+    [
+      projects,
+      selectedCategory,
+      selectedClass,
+      selectedTag,
+      mediaFilter,
+      searchQuery,
+      sortBy,
+    ],
+  );
+
+  const totalPages = Math.max(1, Math.ceil(filteredProjects.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const paginatedProjects = React.useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredProjects.slice(start, start + pageSize);
+  }, [filteredProjects, currentPage, pageSize]);
+
+  const previewProject = React.useMemo(
+    () => projects.find((item) => item.id === previewProjectId) ?? null,
+    [projects, previewProjectId],
+  );
+
+  const modalNavigationList =
+    filteredProjects.length > 0 ? filteredProjects : projects;
+  const adjacentProjects = React.useMemo(
+    () =>
+      previewProject
+        ? getAdjacentProjects(previewProject.id, modalNavigationList)
+        : { prev: null, next: null },
+    [previewProject, modalNavigationList],
+  );
+
+  const handleRetry = () => {
+    setLoading(true);
+    setError(null);
+    setReloadNonce((n) => n + 1);
+  };
+
+  const handleSelectCategory = (category: ShowcaseCategoryFilter) => {
+    setSelectedCategory(category);
+    setPage(1);
+    syncUrlParams({
+      category,
+      cls: selectedClass,
+      tag: selectedTag,
+      media: mediaFilter,
+      sort: sortBy,
+      q: searchQuery,
+      project: previewProjectId,
+    });
+  };
+
+  const handleSelectClass = (cls: string) => {
+    setSelectedClass(cls);
+    setPage(1);
+    syncUrlParams({
+      category: selectedCategory,
+      cls,
+      tag: selectedTag,
+      media: mediaFilter,
+      sort: sortBy,
+      q: searchQuery,
+      project: previewProjectId,
+    });
+  };
+
+  const handleSelectTag = (tag: string, closeModal = false) => {
+    const nextProjectId = closeModal ? null : previewProjectId;
+    setSelectedTag(tag);
+    if (closeModal) setPreviewProjectId(null);
+    setPage(1);
+    syncUrlParams({
+      category: selectedCategory,
+      cls: selectedClass,
+      tag,
+      media: mediaFilter,
+      sort: sortBy,
+      q: searchQuery,
+      project: nextProjectId,
+    });
+  };
+
+  const handleMediaFilterChange = (media: ShowcaseMediaFilter) => {
+    setMediaFilter(media);
+    setPage(1);
+    syncUrlParams({
+      category: selectedCategory,
+      cls: selectedClass,
+      tag: selectedTag,
+      media,
+      sort: sortBy,
+      q: searchQuery,
+      project: previewProjectId,
+    });
+  };
+
+  const handleSortChange = (sort: ShowcaseSortKey) => {
+    setSortBy(sort);
+    setPage(1);
+    syncUrlParams({
+      category: selectedCategory,
+      cls: selectedClass,
+      tag: selectedTag,
+      media: mediaFilter,
+      sort,
+      q: searchQuery,
+      project: previewProjectId,
+    });
+  };
+
+  const handleSearchChange = (q: string) => {
+    setSearchQuery(q);
+    setPage(1);
+    syncUrlParams({
+      category: selectedCategory,
+      cls: selectedClass,
+      tag: selectedTag,
+      media: mediaFilter,
+      sort: sortBy,
+      q,
+      project: previewProjectId,
+    });
+  };
+
+  const handleResetFilters = () => {
+    setSelectedCategory("all");
+    setSelectedClass("all");
+    setSelectedTag("all");
+    setMediaFilter("all");
+    setSortBy("newest");
+    setSearchQuery("");
+    setPage(1);
+    syncUrlParams({
+      category: "all",
+      cls: "all",
+      tag: "all",
+      media: "all",
+      sort: "newest",
+      q: "",
+      project: previewProjectId,
+    });
+  };
+
+  const handleOpenProject = (project: PublicStudentProject) => {
+    setPreviewProjectId(project.id);
+    syncUrlParams({
+      category: selectedCategory,
+      cls: selectedClass,
+      tag: selectedTag,
+      media: mediaFilter,
+      sort: sortBy,
+      q: searchQuery,
+      project: project.id,
+    });
+  };
+
+  const handleCloseProject = () => {
+    setPreviewProjectId(null);
+    syncUrlParams({
+      category: selectedCategory,
+      cls: selectedClass,
+      tag: selectedTag,
+      media: mediaFilter,
+      sort: sortBy,
+      q: searchQuery,
+      project: null,
+    });
+  };
+
+  const handleShareProject = async (project: PublicStudentProject) => {
+    if (typeof window === "undefined") return;
+    const url = `${window.location.origin}/showcase?project=${encodeURIComponent(project.id)}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast({
+        title: "Đã sao chép liên kết dự án",
+        description: project.title,
+        variant: "success",
+      });
+    } catch {
+      toast({
+        title: "Không thể truy cập clipboard",
+        description: "Vui lòng sao chép trực tiếp đường dẫn trên thanh địa chỉ.",
+        variant: "error",
+      });
+    }
+  };
+
+  const hasActiveFilters =
+    selectedCategory !== "all" ||
+    selectedClass !== "all" ||
+    selectedTag !== "all" ||
+    mediaFilter !== "all" ||
+    sortBy !== "newest" ||
+    searchQuery.trim().length > 0;
+
+  if (loading) {
+    return <ShowcaseSkeleton />;
+  }
 
   return (
     <div className="mx-auto max-w-7xl space-y-10 px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
@@ -103,259 +414,180 @@ export default function ShowcasePage() {
         />
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
           <div>
-            <div className="inline-flex items-center gap-1.5 text-xs font-semibold tracking-wider text-accent uppercase">
-              <FolderGit2 className="size-4" aria-hidden="true" />
+            <div className="inline-flex items-center gap-1.5 text-xs font-semibold tracking-wider text-primary uppercase">
+              <FolderGit2 className="size-4 text-[#B8861E]" aria-hidden="true" />
               <span>Creative Academic Portfolio</span>
             </div>
             <h1 className="mt-1 font-heading text-3xl font-bold text-foreground sm:text-4xl">
-              Thư viện dự án & Sản phẩm học sinh
+              Thư viện dự án &amp; Sản phẩm học sinh
             </h1>
             <p className="mt-1.5 max-w-2xl text-sm text-muted-foreground">
-              Không gian trưng bày các bài luận học thuật, poster nghiên cứu khoa học, hồ sơ tranh
-              biện và bài thuyết trình xuất sắc do học sinh các khối lớp thực hiện.
+              Không gian trưng bày các bài luận học thuật, poster nghiên cứu
+              khoa học, hồ sơ tranh biện và bài thuyết trình xuất sắc do học
+              sinh các khối lớp thực hiện.
             </p>
           </div>
           <Badge variant="warm" className="self-start sm:self-auto">
             <Sparkles className="size-3.5 text-primary" aria-hidden="true" />
-            {STUDENT_PROJECTS_DATA.length} dự án tiêu biểu được tuyển chọn
+            <span>
+              {currentTerm || "Cập nhật trực tiếp"}
+              {stats.latestPublishedAt
+                ? ` · Mới nhất: ${stats.latestPublishedAt}`
+                : ""}
+            </span>
           </Badge>
         </div>
-      </div>
 
-      {/* Filter & Search Bar */}
-      <div className="space-y-4 rounded-2xl border border-border bg-card p-4">
-        <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
-          <div
-            className="flex flex-wrap items-center gap-1.5"
-            role="tablist"
-            aria-label="Lọc dự án theo thể loại"
-          >
-            {PROJECT_CATEGORIES.map((cat) => {
-              const active = selectedCategory === cat.value;
-              return (
-                <button
-                  key={cat.value}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => setSelectedCategory(cat.value)}
-                  className={cn(
-                    "rounded-xl px-3.5 py-1.5 text-xs font-medium transition-colors",
-                    active
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                >
-                  {cat.label}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <select
-              value={selectedClass}
-              onChange={(e) => setSelectedClass(e.target.value)}
-              aria-label="Lọc theo lớp học"
-              className="h-8 rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-            >
-              {classOptions.map((cls) => (
-                <option key={cls} value={cls}>
-                  {cls === "all" ? "Tất cả các lớp" : cls}
-                </option>
-              ))}
-            </select>
-
-            <div className="relative w-full sm:w-64">
-              <Search
-                className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
-                aria-hidden="true"
-              />
-              <Input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Tìm tên dự án, tác giả..."
-                aria-label="Tìm kiếm dự án học sinh"
-                className="pl-9"
-              />
+        {/* Summary Strip */}
+        {!error && projects.length > 0 && (
+          <div className="grid gap-3 pt-2 sm:grid-cols-3">
+            <div className="flex items-center gap-3 rounded-2xl border border-border bg-card px-4 py-3 shadow-2xs">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-warm text-primary">
+                <Layers className="size-5 text-[#B8861E]" aria-hidden="true" />
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Dự án xuất bản</p>
+                <p className="font-heading text-lg font-bold text-foreground">
+                  {stats.totalProjects} sản phẩm
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 rounded-2xl border border-border bg-card px-4 py-3 shadow-2xs">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-secondary text-primary">
+                <Users className="size-5" aria-hidden="true" />
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">
+                  Khối lớp tham gia
+                </p>
+                <p className="font-heading text-lg font-bold text-foreground">
+                  {stats.uniqueClasses} lớp học
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 rounded-2xl border border-border bg-card px-4 py-3 shadow-2xs">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-highlight/25 text-primary">
+                <FileText className="size-5" aria-hidden="true" />
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">
+                  Học liệu đính kèm
+                </p>
+                <p className="font-heading text-lg font-bold text-foreground">
+                  {stats.videoCount} Video · {stats.pdfCount} PDF
+                </p>
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
 
-      {/* Portfolio Grid */}
-      {filteredProjects.length === 0 ? (
+      {error ? (
         <EmptyState
-          title="Không tìm thấy dự án học sinh phù hợp"
-          description="Thử thay đổi bộ lọc thể loại, lớp học hoặc từ khóa tìm kiếm."
+          title="Không thể tải Thư viện dự án"
+          description={error}
           action={
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setSelectedCategory("all");
-                setSelectedClass("all");
-                setSearchQuery("");
-              }}
-            >
-              Đặt lại bộ lọc
+            <Button type="button" variant="outline" onClick={handleRetry}>
+              <RefreshCw className="size-4" aria-hidden="true" />
+              <span>Thử tải lại</span>
             </Button>
           }
         />
       ) : (
-        <div className="grid gap-6 md:grid-cols-2">
-          {filteredProjects.map((project) => (
-            <article
-              key={project.id}
-              className="group flex flex-col justify-between overflow-hidden rounded-2xl border border-border bg-card shadow-2xs transition-all hover:border-accent/50 hover:shadow-md"
-            >
-              <div>
-                {/* Editorial Cover Header */}
-                <div
-                  className={cn(
-                    "flex items-center justify-between gap-3 px-6 py-4",
-                    themeBannerStyles[project.accentTheme],
-                  )}
+        <>
+          <ShowcaseToolbar
+            selectedCategory={selectedCategory}
+            onSelectCategory={handleSelectCategory}
+            categoryCounts={categoryCounts}
+            classes={availableClasses}
+            selectedClass={selectedClass}
+            onSelectClass={handleSelectClass}
+            selectedTag={selectedTag}
+            onSelectTag={(t) => handleSelectTag(t, false)}
+            mediaFilter={mediaFilter}
+            onMediaFilterChange={handleMediaFilterChange}
+            sortBy={sortBy}
+            onSortChange={handleSortChange}
+            searchQuery={searchQuery}
+            onSearchChange={handleSearchChange}
+            hasActiveFilters={hasActiveFilters}
+            onResetFilters={handleResetFilters}
+          />
+
+          {projects.length === 0 ? (
+            <EmptyState
+              title="Chưa có dự án học sinh công khai"
+              description="Các sản phẩm nghiên cứu, bài luận và video thuyết trình xuất sắc sẽ hiển thị tại đây ngay khi được duyệt xuất bản."
+            />
+          ) : filteredProjects.length === 0 ? (
+            <EmptyState
+              title="Không tìm thấy dự án học sinh phù hợp"
+              description="Thử thay đổi bộ lọc thể loại, lớp học, chủ đề hashtag hoặc từ khóa tìm kiếm."
+              action={
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleResetFilters}
                 >
-                  <div className="flex items-center gap-2 text-xs font-semibold">
-                    <Layers className="size-4" aria-hidden="true" />
-                    <span>
-                      {PROJECT_CATEGORY_LABELS[project.category] ||
-                        project.category}
-                    </span>
-                  </div>
-                  <span className="rounded-full bg-black/15 px-2.5 py-0.5 font-mono text-[11px] font-semibold">
-                    {project.featuredMetric}
-                  </span>
-                </div>
-
-                {/* Card Content */}
-                <div className="p-6">
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                    <span className="inline-flex items-center gap-1.5 font-medium text-primary">
-                      <Users className="size-3.5 text-accent" aria-hidden="true" />
-                      {project.studentOrTeam}
-                    </span>
-                    <span>{project.className}</span>
-                  </div>
-
-                  <h2 className="mt-2.5 font-heading text-xl font-bold text-foreground group-hover:text-primary">
-                    {project.title}
-                  </h2>
-
-                  <p className="mt-2.5 text-sm leading-relaxed text-muted-foreground">
-                    {project.summary}
-                  </p>
-
-                  <div className="mt-4 rounded-xl bg-warm/45 p-3.5 text-xs leading-relaxed text-foreground/90">
-                    <strong className="font-semibold text-primary">
-                      Nhận xét chuyên môn:
-                    </strong>{" "}
-                    {project.keyTakeaway}
-                  </div>
-                </div>
+                  Đặt lại bộ lọc
+                </Button>
+              }
+            />
+          ) : (
+            <div className="space-y-6">
+              <div className="grid gap-6 md:grid-cols-2">
+                {paginatedProjects.map((project) => (
+                  <ShowcaseProjectCard
+                    key={project.id}
+                    project={project}
+                    selectedClass={selectedClass}
+                    selectedTag={selectedTag}
+                    onSelectClass={handleSelectClass}
+                    onSelectTag={(t) => handleSelectTag(t, false)}
+                    onPreview={handleOpenProject}
+                    onShare={handleShareProject}
+                    isHighlighted={previewProjectId === project.id}
+                  />
+                ))}
               </div>
 
-              {/* Footer Actions */}
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-muted/20 px-6 py-3.5 text-xs">
-                <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-                  <Calendar className="size-3.5" aria-hidden="true" />
-                  Xuất bản: {project.publishedAt}
-                </span>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setPreviewProject(project)}
-                  >
-                    <Eye className="size-3.5" aria-hidden="true" />
-                    Xem tóm tắt
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      toast({
-                        title: "Đang mở hồ sơ dự án",
-                        description: `Đã mở hồ sơ "${project.title}" trong chế độ đọc học thuật.`,
-                        variant: "info",
-                      });
-                      setPreviewProject(project);
-                    }}
-                  >
-                    <ExternalLink className="size-3.5" aria-hidden="true" />
-                    Hồ sơ đầy đủ
-                  </Button>
-                </div>
-              </div>
-            </article>
-          ))}
-        </div>
+              <PaginationBar
+                page={currentPage}
+                totalPages={totalPages}
+                totalItems={filteredProjects.length}
+                pageSize={pageSize}
+                onPageChange={setPage}
+                onPageSizeChange={(sz) => {
+                  setPageSize(sz);
+                  setPage(1);
+                }}
+                pageSizeOptions={[2, 4, 8, 16]}
+              />
+            </div>
+          )}
+        </>
       )}
 
-      {/* Project Detail Modal */}
-      <ModalDialog
-        open={Boolean(previewProject)}
-        onClose={() => setPreviewProject(null)}
-        title={previewProject?.title ?? "Chi tiết dự án học sinh"}
-        description={
-          previewProject
-            ? `${PROJECT_CATEGORY_LABELS[previewProject.category] || previewProject.category} · Thực hiện: ${previewProject.studentOrTeam}`
-            : undefined
-        }
-        size="lg"
-        footer={
-          previewProject ? (
-            <>
-              <Button variant="outline" onClick={() => setPreviewProject(null)}>
-                Đóng
-              </Button>
-              <Button
-                onClick={() => {
-                  toast({
-                    title: "Đã tải bản thuyết trình PDF",
-                    description: `Hồ sơ dự án "${previewProject.title}" đang được tải về.`,
-                    variant: "success",
-                  });
-                  setPreviewProject(null);
-                }}
-              >
-                <BookOpen className="size-4" aria-hidden="true" />
-                Tải hồ sơ dự án (PDF)
-              </Button>
-            </>
-          ) : undefined
-        }
-      >
-        {previewProject && (
-          <div className="space-y-4 text-sm">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="default">{previewProject.featuredMetric}</Badge>
-              <Badge variant="secondary">{previewProject.className}</Badge>
-              <Badge variant="outline">Ngày đăng: {previewProject.publishedAt}</Badge>
-            </div>
-
-            <div className="rounded-xl border border-border bg-background p-4">
-              <h3 className="font-heading text-sm font-semibold text-foreground">
-                Tóm tắt nội dung dự án (Abstract)
-              </h3>
-              <p className="mt-1.5 leading-relaxed text-muted-foreground">
-                {previewProject.summary}
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-primary/20 bg-warm/50 p-4">
-              <div className="flex items-center gap-2 font-heading text-sm font-semibold text-primary">
-                <Award className="size-4 text-accent" aria-hidden="true" />
-                <span>Đánh giá từ Giảng viên hướng dẫn</span>
-              </div>
-              <p className="mt-1.5 leading-relaxed text-foreground/90">
-                {previewProject.keyTakeaway}
-              </p>
-            </div>
-          </div>
-        )}
-      </ModalDialog>
+      <ShowcaseDetailModal
+        project={previewProject}
+        mentor={mentor}
+        currentTerm={currentTerm}
+        prevProject={adjacentProjects.prev}
+        nextProject={adjacentProjects.next}
+        onNavigate={handleOpenProject}
+        onSelectTag={(t) => handleSelectTag(t, true)}
+        onShare={handleShareProject}
+        onClose={handleCloseProject}
+      />
     </div>
+  );
+}
+
+export default function ShowcasePage() {
+  return (
+    <React.Suspense fallback={<ShowcaseSkeleton />}>
+      <ShowcasePageContent />
+    </React.Suspense>
   );
 }

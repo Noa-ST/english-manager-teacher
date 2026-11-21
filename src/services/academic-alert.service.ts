@@ -1,4 +1,5 @@
 import type { AdminStudentRecord } from "./classroom-data";
+import { parseGradeDateToIso } from "./grade-helpers";
 
 export interface AcademicAlertSettings {
   attendanceThreshold: number; // Mặc định: 80 (%)
@@ -30,8 +31,10 @@ export interface StudentAcademicAlert {
  */
 export function parseTargetBand(goal: string | undefined | null): number | null {
   if (!goal) return null;
+  // Loại bỏ mã trình độ CEFR (A1, A2, B1, B2, C1, C2...) để tránh nhận nhầm "B1" -> 1.0
+  const cleaned = goal.replace(/\b[ABC][12]\+?\b/gi, " ");
   // Khớp "IELTS 7.5", "Band 8.0", "Writing 7.5+", "Mục tiêu: 6.5", "Đạt tối thiểu 5 điểm"
-  const match = goal.match(
+  const match = cleaned.match(
     /(?:IELTS|Band|mục tiêu|tối thiểu|writing|reading|speaking|listening)?\s*([0-9]+(?:\.[0-9]+)?)/i,
   );
   if (match && match[1]) {
@@ -48,10 +51,17 @@ export function getStudentAcademicAlerts(
   student: AdminStudentRecord,
   settings: AcademicAlertSettings = DEFAULT_ALERT_SETTINGS,
 ): StudentAcademicAlert[] {
-  const alerts: StudentAcademicAlert[] = [];
+  if (student.status === "archived") {
+    return [];
+  }
 
-  // 1. Chuyên cần dưới ngưỡng cấu hình (Mặc định < 80%)
+  const alerts: StudentAcademicAlert[] = [];
+  const isTrial = student.status === "trial";
+  const isOnLeave = student.status === "on-leave";
+
+  // 1. Chuyên cần dưới ngưỡng cấu hình (Mặc định < 80%) — tạm hoãn khi đang bảo lưu
   if (
+    !isOnLeave &&
     settings.attendanceThreshold > 0 &&
     student.attendanceHistory.length > 0 &&
     student.attendanceRate < settings.attendanceThreshold
@@ -67,18 +77,13 @@ export function getStudentAcademicAlerts(
     });
   }
 
-  // 2. Điểm TB giảm liên tiếp (so sánh 2 bài kiểm tra gần nhất theo ngày tháng)
-  if (settings.alertOnScoreDrop && student.grades.length >= 2) {
-    const parseGradeDate = (d: string) => {
-      const parts = d.split("/");
-      if (parts.length === 3) {
-        return new Date(`${parts[2]}-${parts[1]}-${parts[0]}`).getTime();
-      }
-      return new Date(d).getTime();
-    };
-
-    const sortedGrades = [...student.grades].sort(
-      (a, b) => parseGradeDate(b.date) - parseGradeDate(a.date),
+  // 2. Điểm TB giảm liên tiếp (so sánh 2 bài kiểm tra ĐÃ CÔNG BỐ gần nhất theo ngày tháng)
+  const publishedGrades = student.grades.filter(
+    (g) => (g.status ?? "published") !== "draft",
+  );
+  if (settings.alertOnScoreDrop && publishedGrades.length >= 2) {
+    const sortedGrades = [...publishedGrades].sort((a, b) =>
+      parseGradeDateToIso(b.date).localeCompare(parseGradeDateToIso(a.date)),
     );
 
     const newest = sortedGrades[0];
@@ -94,8 +99,13 @@ export function getStudentAcademicAlerts(
     }
   }
 
-  // 3. Học phí quá hạn
-  if (settings.alertOnOverdueTuition && student.tuitionStatus === "overdue") {
+  // 3. Học phí quá hạn — không cảnh báo khi học thử hoặc đang bảo lưu
+  if (
+    !isTrial &&
+    !isOnLeave &&
+    settings.alertOnOverdueTuition &&
+    student.tuitionStatus === "overdue"
+  ) {
     alerts.push({
       type: "tuition",
       level: "destructive",
@@ -104,8 +114,9 @@ export function getStudentAcademicAlerts(
     });
   }
 
-  // 4. Không có điểm trong thời gian dài / Chưa có đánh giá
+  // 4. Không có điểm trong thời gian dài / Chưa có đánh giá — bỏ qua cho học thử
   if (
+    !isTrial &&
     settings.alertOnNoGrades &&
     (student.grades.length === 0 || student.averageScore === 0)
   ) {

@@ -16,6 +16,7 @@ import { ForbiddenError, UnauthorizedError } from "./errors";
 export const loginCredentialsSchema = z.object({
   email: z.email("Email không đúng định dạng.").max(254),
   password: z.string().min(1, "Vui lòng nhập mật khẩu.").max(256),
+  rememberMe: z.boolean().optional().default(true),
 });
 export type LoginCredentials = z.infer<typeof loginCredentialsSchema>;
 
@@ -29,8 +30,10 @@ export interface LoginResult {
 }
 
 export async function loginWithSupabase(input: unknown): Promise<LoginResult> {
-  const { email, password } = validate(loginCredentialsSchema, input);
-  const supabase = await createSupabaseServerClient();
+  const { email, password, rememberMe } = validate(loginCredentialsSchema, input);
+  const supabase = await createSupabaseServerClient({
+    sessionOnly: rememberMe === false,
+  });
 
   const { data, error } = await supabase.auth.signInWithPassword({
     email: email.trim().toLowerCase(),

@@ -1,4 +1,4 @@
-import type { ApiResponse } from "@/types/api";
+import type { ApiResponse, PaginationMeta } from "@/types/api";
 
 export class ApiClientError extends Error {
   readonly code: string;
@@ -12,10 +12,10 @@ export class ApiClientError extends Error {
   }
 }
 
-export async function apiRequest<T>(
+export async function apiRequestWithMeta<T>(
   url: string,
   init?: RequestInit,
-): Promise<T> {
+): Promise<{ data: T; meta?: PaginationMeta }> {
   const response = await fetch(url, {
     ...init,
     headers: {
@@ -33,6 +33,14 @@ export async function apiRequest<T>(
     );
   }
 
-  return payload.data;
+  return { data: payload.data, meta: payload.meta };
+}
+
+export async function apiRequest<T>(
+  url: string,
+  init?: RequestInit,
+): Promise<T> {
+  const res = await apiRequestWithMeta<T>(url, init);
+  return res.data;
 }
 

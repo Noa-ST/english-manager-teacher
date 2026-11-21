@@ -15,8 +15,10 @@ import { getServerEnv } from "@/lib/env";
  */
 
 function createPrismaClient(): PrismaClient {
-  const { DATABASE_URL, NODE_ENV } = getServerEnv();
-  const adapter = new PrismaPg({ connectionString: DATABASE_URL });
+  const { DATABASE_URL, NODE_ENV, TEST_DATABASE_URL } = getServerEnv();
+  const connectionString =
+    NODE_ENV === "test" && TEST_DATABASE_URL ? TEST_DATABASE_URL : DATABASE_URL;
+  const adapter = new PrismaPg({ connectionString });
 
   return new PrismaClient({
     adapter,
@@ -31,6 +33,13 @@ export function getPrisma(): PrismaClient {
     globalForPrisma.prisma = createPrismaClient();
   }
   return globalForPrisma.prisma;
+}
+
+export async function disconnectPrisma(): Promise<void> {
+  if (globalForPrisma.prisma) {
+    await globalForPrisma.prisma.$disconnect();
+    globalForPrisma.prisma = undefined;
+  }
 }
 
 /**

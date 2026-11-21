@@ -37,10 +37,20 @@ export async function verifyStudentPortalToken(token: string): Promise<{
     const secretKey = new TextEncoder().encode(AUTH_SECRET);
     const { payload } = await jwtVerify(token, secretKey, {
       issuer: "english-manager",
+      algorithms: ["HS256"],
     });
+    if (
+      payload.role !== "student" ||
+      typeof payload.sub !== "string" ||
+      !payload.sub ||
+      typeof payload.code !== "string" ||
+      !payload.code
+    ) {
+      return null;
+    }
     return {
-      studentId: String(payload.sub),
-      studentCode: String(payload.code),
+      studentId: payload.sub,
+      studentCode: payload.code,
     };
   } catch {
     return null;

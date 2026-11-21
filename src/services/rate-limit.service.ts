@@ -1,9 +1,12 @@
+import { isIP } from "node:net";
+
 import { prisma } from "@/lib/db/prisma";
 import { TooManyRequestsError } from "./errors";
 
 const MAX_FAILED_ATTEMPTS = 5;
 const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
+const MAX_MEMORY_ENTRIES = 10_000;
 
 interface MemoryRateLimitRecord {
   failedAttempts: number;
@@ -15,32 +18,65 @@ interface MemoryRateLimitRecord {
 // In-memory fallback for test and offline development environments
 const memoryRateLimits = new Map<string, MemoryRateLimitRecord>();
 
+function pruneMemoryRateLimits(now: number): void {
+  for (const [k, rec] of memoryRateLimits) {
+    const expiredWindow = now - rec.firstFailedAt > WINDOW_MS && (!rec.lockedUntil || rec.lockedUntil <= now);
+    const expiredLock = Boolean(rec.lockedUntil && rec.lockedUntil <= now);
+    if (expiredWindow || expiredLock) {
+      memoryRateLimits.delete(k);
+    }
+  }
+  while (memoryRateLimits.size >= MAX_MEMORY_ENTRIES) {
+    const oldestKey = memoryRateLimits.keys().next().value;
+    if (oldestKey === undefined) break;
+    memoryRateLimits.delete(oldestKey);
+  }
+}
+
+/**
+ * Extracts client IP ONLY from forwarding headers when running behind a
+ * explicitly trusted proxy (TRUST_PROXY=true or VERCEL=1); otherwise falls back
+ * to a fixed non-spoofable key so attackers cannot bypass IP lockouts by rotating
+ * X-Forwarded-For / CF-Connecting-IP headers.
+ */
 export function getClientIp(request: Request): string {
-  const headers = request.headers;
-  const cfIp = headers.get("cf-connecting-ip");
-  if (cfIp) return cfIp.trim();
+  const trustProxy =
+    process.env.TRUST_PROXY === "true" || process.env.VERCEL === "1";
 
-  const realIp = headers.get("x-real-ip");
-  if (realIp) return realIp.trim();
+  if (trustProxy) {
+    const headers = request.headers;
+    const cfIp = headers.get("cf-connecting-ip")?.trim();
+    if (cfIp && isIP(cfIp)) return cfIp;
 
-  const forwarded = headers.get("x-forwarded-for");
-  if (forwarded) {
-    const parts = forwarded.split(",");
-    if (parts.length > 0 && parts[0].trim()) {
-      return parts[0].trim();
+    const realIp = headers.get("x-real-ip")?.trim();
+    if (realIp && isIP(realIp)) return realIp;
+
+    const forwarded = headers.get("x-forwarded-for");
+    if (forwarded) {
+      const parts = forwarded
+        .split(",")
+        .map((p) => p.trim())
+        .filter((p) => isIP(p) !== 0);
+      if (parts.length > 0) {
+        return parts[parts.length - 1];
+      }
     }
   }
 
-  return "127.0.0.1";
+  return "untrusted-proxy-client";
 }
 
 /**
  * Checks if the identifier (IP or composite identifier) is currently locked.
  * Throws TooManyRequestsError if locked.
  */
-export async function assertNotRateLimited(identifier: string): Promise<void> {
+export async function assertNotRateLimited(
+  identifier: string,
+  options?: { maxAttempts?: number; customLockMessage?: string },
+): Promise<void> {
   const now = Date.now();
   const isTest = process.env.NODE_ENV === "test";
+  const maxAttempts = options?.maxAttempts ?? MAX_FAILED_ATTEMPTS;
 
   // 1. Try Prisma DB if available in non-test mode
   if (!isTest) {
@@ -55,10 +91,14 @@ export async function assertNotRateLimited(identifier: string): Promise<void> {
             (record.lockedUntil.getTime() - now) / 60000,
           );
           throw new TooManyRequestsError(
-            `Bạn đã thử sai quá ${MAX_FAILED_ATTEMPTS} lần liên tiếp. Cổng tra cứu tạm thời bị khóa trong ${remainingMinutes} phút vì lý do an toàn.`,
+            options?.customLockMessage ??
+              `Bạn đã thử sai quá ${maxAttempts} lần liên tiếp. Cổng tra cứu tạm thời bị khóa trong ${remainingMinutes} phút vì lý do an toàn.`,
           );
         }
-        return;
+        // Clear expired lock so old windows don't linger or bypass memory check
+        if (record.lockedUntil && record.lockedUntil.getTime() <= now) {
+          await prisma.authRateLimit.delete({ where: { identifier } }).catch(() => {});
+        }
       }
     } catch (err) {
       if (err instanceof TooManyRequestsError) throw err;
@@ -72,12 +112,16 @@ export async function assertNotRateLimited(identifier: string): Promise<void> {
   if (memRecord.lockedUntil && memRecord.lockedUntil > now) {
     const remainingMinutes = Math.ceil((memRecord.lockedUntil - now) / 60000);
     throw new TooManyRequestsError(
-      `Bạn đã thử sai quá ${MAX_FAILED_ATTEMPTS} lần liên tiếp. Cổng tra cứu tạm thời bị khóa trong ${remainingMinutes} phút vì lý do an toàn.`,
+      options?.customLockMessage ??
+        `Bạn đã thử sai quá ${maxAttempts} lần liên tiếp. Cổng tra cứu tạm thời bị khóa trong ${remainingMinutes} phút vì lý do an toàn.`,
     );
   }
 
-  // If lock expired, clear it
-  if (memRecord.lockedUntil && memRecord.lockedUntil <= now) {
+  // If lock or window expired, clear it
+  if (
+    (memRecord.lockedUntil && memRecord.lockedUntil <= now) ||
+    now - memRecord.firstFailedAt > WINDOW_MS
+  ) {
     memoryRateLimits.delete(identifier);
   }
 }
@@ -86,10 +130,14 @@ export async function assertNotRateLimited(identifier: string): Promise<void> {
  * Records a failed attempt for the given identifier.
  * Automatically locks when failed attempts reach the threshold.
  */
-export async function registerFailedAttempt(identifier: string): Promise<void> {
+export async function registerFailedAttempt(
+  identifier: string,
+  options?: { maxAttempts?: number },
+): Promise<void> {
   const now = new Date();
   const nowMs = now.getTime();
   const isTest = process.env.NODE_ENV === "test";
+  const maxAttempts = options?.maxAttempts ?? MAX_FAILED_ATTEMPTS;
 
   // 1. Try Prisma DB in non-test mode
   if (!isTest) {
@@ -99,7 +147,6 @@ export async function registerFailedAttempt(identifier: string): Promise<void> {
       });
 
       if (!existing || nowMs - existing.firstFailedAt.getTime() > WINDOW_MS) {
-        // New window
         await prisma.authRateLimit.upsert({
           where: { identifier },
           create: {
@@ -107,19 +154,19 @@ export async function registerFailedAttempt(identifier: string): Promise<void> {
             failedAttempts: 1,
             firstFailedAt: now,
             lastFailedAt: now,
-            lockedUntil: null,
+            lockedUntil: maxAttempts <= 1 ? new Date(nowMs + LOCKOUT_MS) : null,
           },
           update: {
             failedAttempts: 1,
             firstFailedAt: now,
             lastFailedAt: now,
-            lockedUntil: null,
+            lockedUntil: maxAttempts <= 1 ? new Date(nowMs + LOCKOUT_MS) : null,
           },
         });
       } else {
         const nextCount = existing.failedAttempts + 1;
         const lockedUntil =
-          nextCount >= MAX_FAILED_ATTEMPTS ? new Date(nowMs + LOCKOUT_MS) : null;
+          nextCount >= maxAttempts ? new Date(nowMs + LOCKOUT_MS) : null;
 
         await prisma.authRateLimit.update({
           where: { identifier },
@@ -135,19 +182,22 @@ export async function registerFailedAttempt(identifier: string): Promise<void> {
     }
   }
 
-  // 2. In-memory record
+  // 2. In-memory record with bounded pruning
+  if (memoryRateLimits.size >= MAX_MEMORY_ENTRIES) {
+    pruneMemoryRateLimits(nowMs);
+  }
   const existingMem = memoryRateLimits.get(identifier);
   if (!existingMem || nowMs - existingMem.firstFailedAt > WINDOW_MS) {
     memoryRateLimits.set(identifier, {
       failedAttempts: 1,
       firstFailedAt: nowMs,
       lastFailedAt: nowMs,
-      lockedUntil: null,
+      lockedUntil: maxAttempts <= 1 ? nowMs + LOCKOUT_MS : null,
     });
   } else {
     existingMem.failedAttempts += 1;
     existingMem.lastFailedAt = nowMs;
-    if (existingMem.failedAttempts >= MAX_FAILED_ATTEMPTS) {
+    if (existingMem.failedAttempts >= maxAttempts) {
       existingMem.lockedUntil = nowMs + LOCKOUT_MS;
     }
   }

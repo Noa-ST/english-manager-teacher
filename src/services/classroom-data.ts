@@ -32,6 +32,8 @@ export interface AnnouncementAttachment {
   size: string;
   type: "PDF" | "DOCX" | "SLIDE";
   downloadCount: number;
+  url?: string | null;
+  objectKey?: string | null;
 }
 
 export interface AnnouncementItem {
@@ -65,6 +67,80 @@ export interface WeeklyClassSession {
   capacity: number;
   status: "upcoming" | "ongoing" | "completed";
   hasConflict?: boolean;
+}
+
+export type ScheduleExceptionType = "canceled" | "rescheduled" | "makeup";
+
+export interface ScheduleException {
+  id: string;
+  type: ScheduleExceptionType;
+  originalSessionId?: string;
+  classId: string;
+  classCode: string;
+  className: string;
+  level: string;
+  /** Original date (YYYY-MM-DD), or target date for a standalone makeup lesson. */
+  originalDate: string;
+  /** Destination date (YYYY-MM-DD) for rescheduled or makeup session. */
+  newDate?: string;
+  startTime: string;
+  endTime: string;
+  room: string;
+  topic: string;
+  reason: string;
+  announcementId?: string;
+  createdAt: string;
+}
+
+export interface ResolvedScheduleOccurrence {
+  occurrenceKey: string;
+  date: string;
+  dayOfWeek: number;
+  dayLabel: string;
+  startTime: string;
+  endTime: string;
+  classId: string;
+  classCode: string;
+  className: string;
+  level: string;
+  room: string;
+  topic: string;
+  enrolledCount: number;
+  capacity: number;
+  weekNumber: number;
+  totalWeeks: number;
+  source: "recurring" | "rescheduled" | "makeup";
+  status: "upcoming" | "ongoing" | "completed" | "canceled";
+  hasConflict: boolean;
+  conflictMessage?: string;
+  recurringSessionId?: string;
+  exceptionId?: string;
+  exceptionType?: ScheduleExceptionType;
+  exceptionReason?: string;
+  originalDate?: string;
+  classSessionId?: string;
+  attendanceRecorded: boolean;
+  attendanceRate: number | null;
+  journalStatus: JournalStatus | "none";
+}
+
+export interface StudentScheduleOccurrence {
+  occurrenceKey: string;
+  date: string;
+  dayOfWeek: number;
+  dayLabel: string;
+  startTime: string;
+  endTime: string;
+  classCode: string;
+  className: string;
+  level: string;
+  room: string;
+  topic: string;
+  source: "recurring" | "rescheduled" | "makeup";
+  status: "upcoming" | "ongoing" | "completed" | "canceled";
+  exceptionType?: ScheduleExceptionType;
+  exceptionReason?: string;
+  originalDate?: string;
 }
 
 export interface TimeSlotDef {
@@ -105,6 +181,8 @@ export const STANDARD_ROOMS = [
 
 export interface HallOfFameStudent {
   id: string;
+  studentId?: string;
+  classId?: string;
   displayName: string;
   avatarInitials: string;
   className: string;
@@ -132,6 +210,9 @@ export interface PodcastEpisode {
   coverTheme: "navy" | "cream" | "sky" | "coral";
   vocabularyHighlights: { term: string; ipa: string; meaning: string }[];
   status: "published" | "draft";
+  audioKey?: string | null;
+  audioUrl?: string | null;
+  thumbnailKey?: string | null;
 }
 
 export interface StudentProjectItem {
@@ -146,7 +227,14 @@ export interface StudentProjectItem {
   externalUrl: string;
   featuredMetric: string;
   accentTheme: "navy" | "blue" | "coral" | "cream";
-  status: "published" | "draft";
+  status: "published" | "draft" | "pending_review";
+  posterUrl?: string | null;
+  posterPublicId?: string | null;
+  documentUrl?: string | null;
+  documentName?: string | null;
+  documentSize?: string | null;
+  videoUrl?: string | null;
+  tags?: string[];
 }
 
 export interface ResourceFolder {
@@ -218,7 +306,10 @@ export interface StorageAuditLogEntry {
     | "DELETE_FILE"
     | "REPLACE_FILE"
     | "CREATE_SIGNED_URL"
-    | "ROLLBACK_ORPHAN";
+    | "ROLLBACK_ORPHAN"
+    | "TOGGLE_VISIBILITY"
+    | "CLEANUP_ORPHANS"
+    | "UPDATE_METADATA";
   provider: "cloudinary" | "supabase" | "r2" | "s3" | "local";
   actorId: string;
   targetId: string;
@@ -235,6 +326,23 @@ export interface OrphanedStorageObject {
   storagePath: string;
   cloudinaryPublicId: string | null;
   reason: string;
+  createdAt: string;
+}
+
+export interface SettingsAuditLogEntry {
+  id: string;
+  action:
+    | "UPDATE_BRAND"
+    | "UPDATE_SECURITY"
+    | "UPDATE_OPERATIONS"
+    | "RESET_SETTINGS"
+    | "EXPORT_SNAPSHOT"
+    | "CREATE_STUDENT_ACCOUNT"
+    | "TOGGLE_STUDENT_ACCOUNT"
+    | "RESET_STUDENT_PASSWORD";
+  actorId: string;
+  changedFields: string[];
+  summary: string;
   createdAt: string;
 }
 
@@ -260,6 +368,8 @@ export interface CurriculumAttachment {
   sizeBytes?: number;
   type: "PDF" | "DOCX" | "SLIDE" | "WORKSHEET" | "IMAGE" | "AUDIO";
   uploadedAt: string;
+  storedFileId?: string;
+  visibility?: "public" | "private";
   classId?: string;
   classCode?: string;
   weekNumber?: number;
@@ -274,19 +384,35 @@ export interface MasterCurriculumMaterial {
   sizeBytes?: number;
   type: "PDF" | "DOCX" | "SLIDE" | "WORKSHEET" | "IMAGE" | "AUDIO";
   uploadedAt: string;
+  storedFileId?: string;
+  visibility?: "public" | "private";
   assignments: MaterialClassAssignment[];
 }
+
+export type CurriculumSkillFocus =
+  | "Listening"
+  | "Reading"
+  | "Writing"
+  | "Speaking"
+  | "Grammar-Vocab"
+  | "Mixed";
 
 export interface CurriculumWeek {
   weekNumber: number;
   title: string;
   focus?: string;
+  focusSkill?: CurriculumSkillFocus;
+  plannedSessions?: number;
   status?: WeekProgressStatus;
   scheduledDate?: string;
   completedDate?: string;
   teacherName?: string;
   notes?: string;
   homework?: string;
+  homeworkDueDate?: string;
+  isAssessmentMilestone?: boolean;
+  assessmentTitle?: string;
+  lessonObjectives?: string[];
   materialsCount?: number;
   attachments?: CurriculumAttachment[];
 }
@@ -312,6 +438,11 @@ export interface CurriculumPreset {
   curriculum: CurriculumWeek[];
 }
 
+export interface CurriculumTemplate extends CurriculumPreset {
+  isCustom?: boolean;
+  createdAt?: string;
+}
+
 export interface ClassroomGroup {
   id: string;
   code: string;
@@ -326,16 +457,67 @@ export interface ClassroomGroup {
   averageScore: number;
   currentModule: string;
   status: "active" | "upcoming" | "completed" | "archived";
+  startDate?: string;
+  expectedEndDate?: string;
+  completedAt?: string;
   totalWeeks?: number;
   currentWeekIndex?: number;
   curriculum?: CurriculumWeek[];
   tuitionDueDate?: string;
 }
 
+export interface TuitionPaymentRecord {
+  id: string;
+  period: string;
+  baseAmount: number;
+  discountAmount: number;
+  paidAmount: number;
+  dueDate: string;
+  paidAt?: string;
+  method?: "transfer" | "cash" | "other";
+  status: "paid" | "partial" | "due-soon" | "overdue";
+  note?: string;
+  receiptCode?: string;
+}
+
+export interface CommunicationLogEntry {
+  id: string;
+  date: string;
+  channel: "zalo" | "phone" | "email" | "in-person";
+  category: "academic" | "tuition" | "attendance" | "general";
+  summary: string;
+  parentResponse?: string;
+  nextFollowUpDate?: string;
+  loggedBy: string;
+}
+
+export interface StudentClassTransferEntry {
+  id: string;
+  oldClassId: string;
+  oldClassName: string;
+  newClassId: string;
+  newClassName: string;
+  changedAt: string;
+  changedBy: string;
+  reason?: string;
+}
+
+export interface StudentGradeChangeEntry {
+  id: string;
+  gradeRecordId?: string;
+  assessmentTitle: string;
+  oldScore: number;
+  newScore: number;
+  changedAt: string;
+  changedBy: string;
+  reason?: string;
+}
+
 export interface AdminStudentRecord {
   id: string;
   code: string;
   fullName: string;
+  portalPinHash?: string;
   classId: string;
   className: string;
   level: string;
@@ -343,11 +525,25 @@ export interface AdminStudentRecord {
   attendanceRate: number;
   averageScore: number;
   targetGoal: string;
+  entryBand?: number;
   tuitionStatus: "paid" | "due-soon" | "overdue";
   tuitionPeriod: string;
   tuitionAmount: string;
+  tuitionDueDate?: string;
   parentRelation: string;
   parentContactMasked: string;
+  parentName?: string;
+  parentPhone?: string;
+  parentEmail?: string;
+  parentNote?: string;
+  privateNote?: string;
+  leaveStartDate?: string;
+  leaveReturnDate?: string;
+  leaveReason?: string;
+  tuitionHistory?: TuitionPaymentRecord[];
+  communicationLogs?: CommunicationLogEntry[];
+  classTransferHistory?: StudentClassTransferEntry[];
+  gradeChangeHistory?: StudentGradeChangeEntry[];
   status: "active" | "trial" | "on-leave" | "archived";
   deletedAt?: string | null;
   recentComment: string;
@@ -361,6 +557,9 @@ export interface AdminStudentRecord {
     speaking: number;
     overall: number;
     comment: string;
+    status?: "published" | "draft";
+    privateNote?: string;
+    updatedAt?: string;
   }[];
   attendanceHistory: {
     sessionId?: string;
@@ -383,10 +582,12 @@ export type SessionSkillType = "Listening" | "Reading" | "Writing" | "Speaking" 
 
 export interface SessionAttachment {
   id: string;
+  storedFileId?: string;
   name: string;
-  type: "PDF" | "SLIDE" | "IMAGE" | "DOCX" | "WORKSHEET";
+  type: "PDF" | "SLIDE" | "IMAGE" | "DOCX" | "WORKSHEET" | "AUDIO";
   size: string;
   url?: string;
+  uploadedAt?: string;
 }
 
 export interface JournalRevision {
@@ -394,7 +595,10 @@ export interface JournalRevision {
   updatedAt: string;
   summary: string;
   previousTopic: string;
+  previousObjectives?: string;
   previousNotes: string;
+  previousHomework?: string;
+  previousNextSessionPlan?: string;
   previousCompletionResult: SessionCompletionResult;
 }
 
@@ -430,13 +634,57 @@ export interface ClassSessionRecord {
   objectives: string;
   completionResult: SessionCompletionResult;
   generalNotes: string;
+  /** Ghi chú nội bộ riêng của giáo viên, KHÔNG bao giờ xuất hiện trên Cổng Học sinh */
+  privateNotes?: string;
   homework: string;
   nextSessionPlan: string;
   journalStatus: JournalStatus;
+  scheduleExceptionId?: string;
   attachments: SessionAttachment[];
   revisions: JournalRevision[];
   studentRecords: SessionStudentRecord[];
   updatedAt: string;
+}
+
+export interface StudentPortalSessionEntry {
+  id: string;
+  classId: string;
+  classCode: string;
+  className: string;
+  date: string;
+  dayLabel: string;
+  startTime: string;
+  endTime: string;
+  room: string;
+  weekNumber: number;
+  topic: string;
+  objectives: string;
+  completionResult: SessionCompletionResult;
+  generalNotes: string;
+  homework: string;
+  nextSessionPlan: string;
+  attachments: SessionAttachment[];
+  studentFeedback?: string;
+  studentAttendance?: "present" | "late" | "absent" | "excused";
+  homeworkStatus?: SessionHomeworkStatus;
+  learningStatus?: SessionLearningStatus;
+  score?: number;
+}
+
+export interface PendingScheduleJournalItem {
+  occurrenceKey: string;
+  classId: string;
+  classCode: string;
+  className: string;
+  date: string;
+  dayLabel: string;
+  startTime: string;
+  endTime: string;
+  room: string;
+  weekNumber: number;
+  topic: string;
+  source: "weekly" | "rescheduled" | "makeup";
+  scheduleExceptionId?: string;
 }
 
 export interface AnalyticsAlertAckRecord {
@@ -738,6 +986,8 @@ export const WEEKLY_SCHEDULE_DATA: WeeklyClassSession[] = [
   },
 ];
 
+export const SCHEDULE_EXCEPTIONS_DATA: ScheduleException[] = [];
+
 // -----------------------------------------------------------------------------
 // 4. HALL OF FAME (PUBLIC HONOR ROLL — NO PRIVATE PII)
 // -----------------------------------------------------------------------------
@@ -745,6 +995,8 @@ export const WEEKLY_SCHEDULE_DATA: WeeklyClassSession[] = [
 export const HALL_OF_FAME_DATA: HallOfFameStudent[] = [
   {
     id: "hof-1",
+    studentId: "stu-01",
+    classId: "cls-ii-01",
     displayName: "Trần Bảo Ngọc",
     avatarInitials: "BN",
     className: "IELTS Intensive 6.5+",
@@ -759,6 +1011,8 @@ export const HALL_OF_FAME_DATA: HallOfFameStudent[] = [
   },
   {
     id: "hof-2",
+    studentId: "stu-02",
+    classId: "cls-aw-02",
     displayName: "Lê Hoàng Minh Khôi",
     avatarInitials: "MK",
     className: "Academic Writing B2-C1",
@@ -773,6 +1027,8 @@ export const HALL_OF_FAME_DATA: HallOfFameStudent[] = [
   },
   {
     id: "hof-3",
+    studentId: "stu-03",
+    classId: "cls-if-01",
     displayName: "Phạm Hà Phương",
     avatarInitials: "HP",
     className: "IELTS Foundation",
@@ -1023,6 +1279,12 @@ export const STUDENT_PROJECTS_DATA: StudentProjectItem[] = [
     featuredMetric: "1.500 từ · 12 nguồn APA",
     accentTheme: "navy",
     status: "published",
+    posterUrl: "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1200&q=80",
+    documentUrl: "https://example.com/documents/Urban-Green-Spaces-Research-Report.pdf",
+    documentName: "Urban-Green-Spaces-Research-Report.pdf",
+    documentSize: "2.8 MB",
+    videoUrl: null,
+    tags: ["IELTS Writing", "APA 7th", "Urban Ecology", "Mental Health"],
   },
   {
     id: "proj-2",
@@ -1038,6 +1300,12 @@ export const STUDENT_PROJECTS_DATA: StudentProjectItem[] = [
     featuredMetric: "Video 25 phút + Kịch bản",
     accentTheme: "blue",
     status: "published",
+    posterUrl: "https://images.unsplash.com/photo-1524178232363-1fb2b075b655?auto=format&fit=crop&w=1200&q=80",
+    documentUrl: "https://example.com/documents/AI-Tutors-Debate-Brief-2026.pdf",
+    documentName: "AI-Tutors-Debate-Brief-2026.pdf",
+    documentSize: "1.9 MB",
+    videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    tags: ["Debate", "Artificial Intelligence", "Hedging Language", "Academic Speaking"],
   },
   {
     id: "proj-3",
@@ -1053,6 +1321,12 @@ export const STUDENT_PROJECTS_DATA: StudentProjectItem[] = [
     featuredMetric: "Booklet 16 trang",
     accentTheme: "coral",
     status: "published",
+    posterUrl: "https://images.unsplash.com/photo-1509391365360-2e959784a276?auto=format&fit=crop&w=1200&q=80",
+    documentUrl: "https://example.com/documents/Renewable-Energy-Illustrated-Guide.pdf",
+    documentName: "Renewable-Energy-Illustrated-Guide.pdf",
+    documentSize: "4.5 MB",
+    videoUrl: "https://www.youtube.com/watch?v=2vjPBrBU-TM",
+    tags: ["Young Learners", "Presentation", "Green Energy", "STEM"],
   },
   {
     id: "proj-4",
@@ -1068,6 +1342,12 @@ export const STUDENT_PROJECTS_DATA: StudentProjectItem[] = [
     featuredMetric: "Band 7.5 Writing Criterion",
     accentTheme: "cream",
     status: "published",
+    posterUrl: "https://images.unsplash.com/photo-1532012164546-f432f2e3777f?auto=format&fit=crop&w=1200&q=80",
+    documentUrl: "https://example.com/documents/Craft-Villages-Vietnam-Digital-Economy.pdf",
+    documentName: "Craft-Villages-Vietnam-Digital-Economy.pdf",
+    documentSize: "1.4 MB",
+    videoUrl: null,
+    tags: ["Problem-Solution", "Task 2 Academic", "Cultural Heritage", "Digital Economy"],
   },
 ];
 
@@ -1393,14 +1673,14 @@ export const CURRICULUM_PRESETS: CurriculumPreset[] = [
     targetBand: "IELTS 3.0–3.5+",
     totalWeeks: 8,
     curriculum: [
-      { weekNumber: 1, title: "Bảng phiên âm IPA & Chuẩn hóa phát âm" },
-      { weekNumber: 2, title: "12 thì cơ bản & Ngữ pháp cấu trúc câu" },
-      { weekNumber: 3, title: "Danh từ, Đại từ & Giới từ thông dụng" },
-      { weekNumber: 4, title: "Kỹ năng nghe hội thoại sinh hoạt hàng ngày" },
-      { weekNumber: 5, title: "Kỹ năng đọc hiểu mẩu tin & thư ngắn" },
-      { weekNumber: 6, title: "Thực hành nói phản xạ giao tiếp căn bản" },
-      { weekNumber: 7, title: "Mở rộng vốn từ vựng gia đình & công việc" },
-      { weekNumber: 8, title: "Ôn tập tổng hợp & Kiểm tra đánh giá cuối khóa" },
+      { weekNumber: 1, title: "Bảng phiên âm IPA & Chuẩn hóa phát âm", focusSkill: "Speaking", plannedSessions: 2, focus: "44 âm IPA & nguyên âm đôi/đơn", homework: "Ghi âm đọc bảng 44 âm IPA và 20 từ khóa." },
+      { weekNumber: 2, title: "12 thì cơ bản & Ngữ pháp cấu trúc câu", focusSkill: "Grammar-Vocab", plannedSessions: 2 },
+      { weekNumber: 3, title: "Danh từ, Đại từ & Giới từ thông dụng", focusSkill: "Grammar-Vocab", plannedSessions: 2 },
+      { weekNumber: 4, title: "Kỹ năng nghe hội thoại sinh hoạt hàng ngày", focusSkill: "Listening", plannedSessions: 2, isAssessmentMilestone: true, assessmentTitle: "Kiểm tra Giữa khóa Cơ bản (8 tuần)" },
+      { weekNumber: 5, title: "Kỹ năng đọc hiểu mẩu tin & thư ngắn", focusSkill: "Reading", plannedSessions: 2 },
+      { weekNumber: 6, title: "Thực hành nói phản xạ giao tiếp căn bản", focusSkill: "Speaking", plannedSessions: 2 },
+      { weekNumber: 7, title: "Mở rộng vốn từ vựng gia đình & công việc", focusSkill: "Grammar-Vocab", plannedSessions: 2 },
+      { weekNumber: 8, title: "Ôn tập tổng hợp & Kiểm tra đánh giá cuối khóa", focusSkill: "Mixed", plannedSessions: 2, isAssessmentMilestone: true, assessmentTitle: "Đánh giá Đầu ra Basic Level" },
     ],
   },
   {
@@ -1410,15 +1690,21 @@ export const CURRICULUM_PRESETS: CurriculumPreset[] = [
     targetBand: "5.5 – 6.5",
     totalWeeks: 14,
     curriculum: [
-      { weekNumber: 1, title: "IELTS Overview & Listening Part 1" },
-      { weekNumber: 2, title: "Reading Question Types & Skimming" },
-      { weekNumber: 3, title: "Writing Task 1: Line Graph & Bar Chart" },
-      { weekNumber: 4, title: "Speaking Part 1: Fluency & Pronunciation" },
-      { weekNumber: 5, title: "Listening Part 2: Map & Multiple Choice" },
-      { weekNumber: 6, title: "Reading: True/False/Not Given Mastery" },
+      { weekNumber: 1, title: "IELTS Overview & Listening Part 1", focusSkill: "Listening", plannedSessions: 2 },
+      { weekNumber: 2, title: "Reading Question Types & Skimming", focusSkill: "Reading", plannedSessions: 2 },
+      { weekNumber: 3, title: "Writing Task 1: Line Graph & Bar Chart", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 4, title: "Speaking Part 1: Fluency & Pronunciation", focusSkill: "Speaking", plannedSessions: 2 },
+      { weekNumber: 5, title: "Listening Part 2: Map & Multiple Choice", focusSkill: "Listening", plannedSessions: 2 },
+      { weekNumber: 6, title: "Reading: True/False/Not Given Mastery", focusSkill: "Reading", plannedSessions: 2, isAssessmentMilestone: true, assessmentTitle: "Mid-term Academic Progress Check (Tháng 10/2026)" },
       {
         weekNumber: 7,
         title: "Paragraph Structure & Paraphrasing",
+        focusSkill: "Writing",
+        plannedSessions: 2,
+        focus: "Phát triển đoạn văn mạch lạc và kỹ thuật diễn giải lại câu chủ đề",
+        scheduledDate: "2026-11-16",
+        homework: "Hoàn thành Phiếu bài tập Paraphrasing (Task 1 & 2) trước Thứ Năm.",
+        homeworkDueDate: "2026-11-21",
         attachments: [
           {
             id: "att-if-01-w7-1",
@@ -1444,13 +1730,13 @@ export const CURRICULUM_PRESETS: CurriculumPreset[] = [
           },
         ],
       },
-      { weekNumber: 8, title: "Writing Task 2: Opinion Essay" },
-      { weekNumber: 9, title: "Speaking Part 2: Long Turn & Cue Card Strategy" },
-      { weekNumber: 10, title: "Listening Part 3: Academic Discussion" },
-      { weekNumber: 11, title: "Reading: Matching Headings & Features" },
-      { weekNumber: 12, title: "Writing Task 2: Discussion Both Views" },
-      { weekNumber: 13, title: "Speaking Part 3: Abstract Ideas & Complex Structures" },
-      { weekNumber: 14, title: "Mock Test 4 Kỹ năng & Đánh giá đầu ra" },
+      { weekNumber: 8, title: "Writing Task 2: Opinion Essay", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 9, title: "Speaking Part 2: Long Turn & Cue Card Strategy", focusSkill: "Speaking", plannedSessions: 2 },
+      { weekNumber: 10, title: "Listening Part 3: Academic Discussion", focusSkill: "Listening", plannedSessions: 2 },
+      { weekNumber: 11, title: "Reading: Matching Headings & Features", focusSkill: "Reading", plannedSessions: 2 },
+      { weekNumber: 12, title: "Writing Task 2: Discussion Both Views", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 13, title: "Speaking Part 3: Abstract Ideas & Complex Structures", focusSkill: "Speaking", plannedSessions: 2 },
+      { weekNumber: 14, title: "Mock Test 4 Kỹ năng & Đánh giá đầu ra", focusSkill: "Mixed", plannedSessions: 2, isAssessmentMilestone: true, assessmentTitle: "Final Mock Test — IELTS Foundation" },
     ],
   },
   {
@@ -1463,6 +1749,9 @@ export const CURRICULUM_PRESETS: CurriculumPreset[] = [
       {
         weekNumber: 1,
         title: "Advanced Lexical Resource & Collocations",
+        focusSkill: "Grammar-Vocab",
+        plannedSessions: 2,
+        scheduledDate: "2026-09-14",
         attachments: [
           {
             id: "att-ii-01-w1-1",
@@ -1488,16 +1777,24 @@ export const CURRICULUM_PRESETS: CurriculumPreset[] = [
           },
         ],
       },
-      { weekNumber: 2, title: "Listening Part 1 & 2: Distractors & Speed Drill" },
-      { weekNumber: 3, title: "Reading: Speed Reading & Inference Questions" },
-      { weekNumber: 4, title: "Writing Task 1: Complex Mixed Charts & Process" },
-      { weekNumber: 5, title: "Speaking Part 1 & 2: Natural Idiomatic Phrasing" },
-      { weekNumber: 6, title: "Writing Task 2: Causes/Solutions & Two-part Question" },
-      { weekNumber: 7, title: "Listening Part 3: Academic Lecture & Multiple Speakers" },
-      { weekNumber: 8, title: "Reading: Complex Science & History Texts" },
+      { weekNumber: 2, title: "Listening Part 1 & 2: Distractors & Speed Drill", focusSkill: "Listening", plannedSessions: 2 },
+      { weekNumber: 3, title: "Reading: Speed Reading & Inference Questions", focusSkill: "Reading", plannedSessions: 2 },
+      { weekNumber: 4, title: "Writing Task 1: Complex Mixed Charts & Process", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 5, title: "Speaking Part 1 & 2: Natural Idiomatic Phrasing", focusSkill: "Speaking", plannedSessions: 2 },
+      { weekNumber: 6, title: "Writing Task 2: Causes/Solutions & Two-part Question", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 7, title: "Listening Part 3: Academic Lecture & Multiple Speakers", focusSkill: "Listening", plannedSessions: 2 },
+      { weekNumber: 8, title: "Reading: Complex Science & History Texts", focusSkill: "Reading", plannedSessions: 2, isAssessmentMilestone: true, assessmentTitle: "Mid-term Academic Progress Check (Tháng 10/2026)" },
       {
         weekNumber: 9,
         title: "Argumentative Essay & Listening Part 3",
+        focusSkill: "Writing",
+        plannedSessions: 2,
+        focus: "Counter-argument, Hedging Language & theo dõi mạch thảo luận học thuật",
+        scheduledDate: "2026-11-16",
+        homework: "Viết Essay Argumentative chủ đề AI in Education (tối thiểu 270 từ).",
+        homeworkDueDate: "2026-11-22",
+        isAssessmentMilestone: true,
+        assessmentTitle: "Argumentative Essay #4 — Education & AI",
         attachments: [
           {
             id: "att-ii-01-w9-1",
@@ -1512,13 +1809,13 @@ export const CURRICULUM_PRESETS: CurriculumPreset[] = [
           },
         ],
       },
-      { weekNumber: 10, title: "Writing Task 1: Map Comparison & Advanced Flow" },
-      { weekNumber: 11, title: "Speaking Part 3: Debate & Critical Stance" },
-      { weekNumber: 12, title: "Listening Part 4: Monologue & Note Completion" },
-      { weekNumber: 13, title: "Writing Task 2: High-band Counter-argument & Rebuttal" },
-      { weekNumber: 14, title: "Reading: Time Management under 55 mins" },
-      { weekNumber: 15, title: "Full Mock Exam & Intensive One-on-one Feedback" },
-      { weekNumber: 16, title: "Exam Psychology & Final Strategy Checklist" },
+      { weekNumber: 10, title: "Writing Task 1: Map Comparison & Advanced Flow", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 11, title: "Speaking Part 3: Debate & Critical Stance", focusSkill: "Speaking", plannedSessions: 2 },
+      { weekNumber: 12, title: "Listening Part 4: Monologue & Note Completion", focusSkill: "Listening", plannedSessions: 2 },
+      { weekNumber: 13, title: "Writing Task 2: High-band Counter-argument & Rebuttal", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 14, title: "Reading: Time Management under 55 mins", focusSkill: "Reading", plannedSessions: 2 },
+      { weekNumber: 15, title: "Full Mock Exam & Intensive One-on-one Feedback", focusSkill: "Mixed", plannedSessions: 2, isAssessmentMilestone: true, assessmentTitle: "Mock Test #3 — Toàn diện 4 kỹ năng (Tháng 11/2026)" },
+      { weekNumber: 16, title: "Exam Psychology & Final Strategy Checklist", focusSkill: "Mixed", plannedSessions: 2 },
     ],
   },
   {
@@ -1528,16 +1825,16 @@ export const CURRICULUM_PRESETS: CurriculumPreset[] = [
     targetBand: "Writing 7.0+",
     totalWeeks: 10,
     curriculum: [
-      { weekNumber: 1, title: "Academic Voice & Formality" },
-      { weekNumber: 2, title: "Sentence Structure & Cohesion Devices" },
-      { weekNumber: 3, title: "Paragraph Logic: Claim, Evidence, Analysis" },
-      { weekNumber: 4, title: "Data Commentary & Synthesizing Sources" },
-      { weekNumber: 5, title: "Writing with Critical Tone & Objectivity" },
-      { weekNumber: 6, title: "Research Synthesis & Hedging" },
-      { weekNumber: 7, title: "Argumentative Rhetoric & Avoiding Fallacies" },
-      { weekNumber: 8, title: "Literature Review Structure" },
-      { weekNumber: 9, title: "Peer Review Workshop & Advanced Editing" },
-      { weekNumber: 10, title: "Final Paper Presentation & Evaluation" },
+      { weekNumber: 1, title: "Academic Voice & Formality", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 2, title: "Sentence Structure & Cohesion Devices", focusSkill: "Grammar-Vocab", plannedSessions: 2 },
+      { weekNumber: 3, title: "Paragraph Logic: Claim, Evidence, Analysis", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 4, title: "Data Commentary & Synthesizing Sources", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 5, title: "Writing with Critical Tone & Objectivity", focusSkill: "Writing", plannedSessions: 2, isAssessmentMilestone: true, assessmentTitle: "Critical Summary & Paraphrasing Test" },
+      { weekNumber: 6, title: "Research Synthesis & Hedging", focusSkill: "Writing", plannedSessions: 2, scheduledDate: "2026-11-16", homework: "Hoàn thành Research Synthesis Draft #2 (800 từ).", homeworkDueDate: "2026-11-22" },
+      { weekNumber: 7, title: "Argumentative Rhetoric & Avoiding Fallacies", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 8, title: "Literature Review Structure", focusSkill: "Reading", plannedSessions: 2 },
+      { weekNumber: 9, title: "Peer Review Workshop & Advanced Editing", focusSkill: "Mixed", plannedSessions: 2 },
+      { weekNumber: 10, title: "Final Paper Presentation & Evaluation", focusSkill: "Speaking", plannedSessions: 2, isAssessmentMilestone: true, assessmentTitle: "Research Essay Milestone #2" },
     ],
   },
   {
@@ -1547,18 +1844,18 @@ export const CURRICULUM_PRESETS: CurriculumPreset[] = [
     targetBand: "Cambridge B1 Preliminary",
     totalWeeks: 12,
     curriculum: [
-      { weekNumber: 1, title: "Ice-breaker & Storytelling Fundamentals" },
-      { weekNumber: 2, title: "World Geography & Nature Vocabulary" },
-      { weekNumber: 3, title: "Animal Habitats & Simple Science Reading" },
-      { weekNumber: 4, title: "Creative Writing: My Imaginary Adventure" },
-      { weekNumber: 5, title: "Cambridge B1 Listening: Everyday Dialogues" },
-      { weekNumber: 6, title: "Pronunciation: Intonation & Linking Sounds" },
-      { weekNumber: 7, title: "Historical Heroes & Past Tense Narration" },
-      { weekNumber: 8, title: "Public Speaking & Science Reading" },
-      { weekNumber: 9, title: "Debate for Kids: Technology in School" },
-      { weekNumber: 10, title: "Writing an Informal Letter to a Penpal" },
-      { weekNumber: 11, title: "Cambridge B1 Mock Test Practice" },
-      { weekNumber: 12, title: "Project Showcase & Graduation Celebration" },
+      { weekNumber: 1, title: "Ice-breaker & Storytelling Fundamentals", focusSkill: "Speaking", plannedSessions: 2 },
+      { weekNumber: 2, title: "World Geography & Nature Vocabulary", focusSkill: "Grammar-Vocab", plannedSessions: 2 },
+      { weekNumber: 3, title: "Animal Habitats & Simple Science Reading", focusSkill: "Reading", plannedSessions: 2 },
+      { weekNumber: 4, title: "Creative Writing: My Imaginary Adventure", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 5, title: "Cambridge B1 Listening: Everyday Dialogues", focusSkill: "Listening", plannedSessions: 2 },
+      { weekNumber: 6, title: "Pronunciation: Intonation & Linking Sounds", focusSkill: "Speaking", plannedSessions: 2, isAssessmentMilestone: true, assessmentTitle: "Science Presentation & Reading Check" },
+      { weekNumber: 7, title: "Historical Heroes & Past Tense Narration", focusSkill: "Grammar-Vocab", plannedSessions: 2 },
+      { weekNumber: 8, title: "Public Speaking & Science Reading", focusSkill: "Speaking", plannedSessions: 2, scheduledDate: "2026-11-16", homework: "Chuẩn bị slide 3 trang & luyện thuyết trình 3 phút.", homeworkDueDate: "2026-11-23" },
+      { weekNumber: 9, title: "Debate for Kids: Technology in School", focusSkill: "Speaking", plannedSessions: 2 },
+      { weekNumber: 10, title: "Writing an Informal Letter to a Penpal", focusSkill: "Writing", plannedSessions: 2 },
+      { weekNumber: 11, title: "Cambridge B1 Mock Test Practice", focusSkill: "Mixed", plannedSessions: 2, isAssessmentMilestone: true, assessmentTitle: "Cambridge B1 Preliminary Mock Test" },
+      { weekNumber: 12, title: "Project Showcase & Graduation Celebration", focusSkill: "Mixed", plannedSessions: 2 },
     ],
   },
 ];
@@ -1582,6 +1879,8 @@ export const CLASSROOMS_DATA: ClassroomGroup[] = [
     averageScore: 7.4,
     currentModule: "Tuần 9/16 · Argumentative Essay & Listening Part 3",
     status: "active",
+    startDate: "2026-09-14",
+    expectedEndDate: "2026-12-28",
     totalWeeks: 16,
     currentWeekIndex: 9,
     curriculum: CURRICULUM_PRESETS[2].curriculum,
@@ -1601,6 +1900,8 @@ export const CLASSROOMS_DATA: ClassroomGroup[] = [
     averageScore: 6.1,
     currentModule: "Tuần 7/14 · Paragraph Structure & Paraphrasing",
     status: "active",
+    startDate: "2026-10-05",
+    expectedEndDate: "2027-01-04",
     totalWeeks: 14,
     currentWeekIndex: 7,
     curriculum: CURRICULUM_PRESETS[1].curriculum,
@@ -1620,6 +1921,8 @@ export const CLASSROOMS_DATA: ClassroomGroup[] = [
     averageScore: 7.6,
     currentModule: "Tuần 6/10 · Research Synthesis & Hedging",
     status: "active",
+    startDate: "2026-10-12",
+    expectedEndDate: "2026-12-14",
     totalWeeks: 10,
     currentWeekIndex: 6,
     curriculum: CURRICULUM_PRESETS[3].curriculum,
@@ -1639,6 +1942,8 @@ export const CLASSROOMS_DATA: ClassroomGroup[] = [
     averageScore: 8.2,
     currentModule: "Tuần 8/12 · Public Speaking & Science Reading",
     status: "active",
+    startDate: "2026-09-28",
+    expectedEndDate: "2026-12-14",
     totalWeeks: 12,
     currentWeekIndex: 8,
     curriculum: CURRICULUM_PRESETS[4].curriculum,
@@ -1658,6 +1963,8 @@ export const CLASSROOMS_DATA: ClassroomGroup[] = [
     averageScore: 0,
     currentModule: "Tuần 1/8 · Bảng phiên âm IPA & Chuẩn hóa phát âm",
     status: "active",
+    startDate: "2026-11-16",
+    expectedEndDate: "2027-01-04",
     totalWeeks: 8,
     currentWeekIndex: 1,
     curriculum: CURRICULUM_PRESETS[0].curriculum,
@@ -1676,12 +1983,70 @@ export const ADMIN_STUDENTS_DATA: AdminStudentRecord[] = [
     joinedAt: "05/08/2026",
     attendanceRate: 100,
     averageScore: 8.0,
+    entryBand: 6.5,
     targetGoal: "IELTS 8.0 (Du học Úc)",
     tuitionStatus: "paid",
     tuitionPeriod: "Học kỳ II (Tháng 11 – 01)",
     tuitionAmount: "6.400.000 ₫",
+    tuitionDueDate: "2026-11-20",
     parentRelation: "Phụ huynh: Cô Thu Hà (Mẹ)",
     parentContactMasked: "0903 ••• 812",
+    parentName: "Cô Thu Hà",
+    parentPhone: "0903555812",
+    parentEmail: "thuha.ph@example.com",
+    parentNote: "Trao đổi thuận tiện qua Zalo buổi tối sau 19h30.",
+    privateNote: "Học viên mục tiêu săn học bổng Úc tháng 2/2027. Cần bổ trợ thêm chiến lược quản lý thời gian Writing Task 1 dưới 18 phút.",
+    tuitionHistory: [
+      {
+        id: "pay-stu01-2",
+        period: "Học kỳ II (Tháng 11 – 01)",
+        baseAmount: 6400000,
+        discountAmount: 0,
+        paidAmount: 6400000,
+        dueDate: "2026-11-20",
+        paidAt: "2026-11-12",
+        method: "transfer",
+        status: "paid",
+        receiptCode: "PT-2611-001",
+        note: "Chuyển khoản VCB đủ kỳ II",
+      },
+      {
+        id: "pay-stu01-1",
+        period: "Học kỳ I (Tháng 08 – 10)",
+        baseAmount: 6400000,
+        discountAmount: 0,
+        paidAmount: 6400000,
+        dueDate: "2026-08-10",
+        paidAt: "2026-08-05",
+        method: "transfer",
+        status: "paid",
+        receiptCode: "PT-2608-001",
+      },
+    ],
+    communicationLogs: [
+      {
+        id: "comm-stu01-1",
+        date: "2026-11-09",
+        channel: "zalo",
+        category: "academic",
+        summary: "Gửi kết quả Mock Test #3 (Overall 8.0) và định hướng luyện đề Speaking Part 3 cho gia đình.",
+        parentResponse: "Mẹ cảm ơn cô, cuối tuần sẽ cho con làm thêm 2 đề Speaking ghi âm gửi cô.",
+        loggedBy: "ThS. Nguyễn Minh Anh",
+      },
+    ],
+    classTransferHistory: [
+      {
+        id: "tr-stu01-1",
+        oldClassId: "cls-if-01",
+        oldClassName: "IELTS Foundation (Band 5.0–6.0)",
+        newClassId: "cls-ii-01",
+        newClassName: "IELTS Intensive (Band 6.5–7.5+)",
+        changedAt: "2026-09-01",
+        changedBy: "ThS. Nguyễn Minh Anh",
+        reason: "Vượt chuẩn đầu vào sau bài Placement & Diagnostic Test",
+      },
+    ],
+    gradeChangeHistory: [],
     status: "active",
     recentComment:
       "Tư duy lập luận rất trưởng thành. Cần duy trì tốc độ kiểm soát thời gian ở Task 1 dưới 18 phút.",
@@ -1772,12 +2137,36 @@ export const ADMIN_STUDENTS_DATA: AdminStudentRecord[] = [
     joinedAt: "12/08/2026",
     attendanceRate: 96,
     averageScore: 7.8,
+    entryBand: 6.5,
     targetGoal: "Writing 7.5+ & Học bổng",
     tuitionStatus: "paid",
     tuitionPeriod: "Học kỳ II (Tháng 11 – 01)",
     tuitionAmount: "5.800.000 ₫",
+    tuitionDueDate: "2026-11-20",
     parentRelation: "Phụ huynh: Anh Hoàng Nam (Bố)",
     parentContactMasked: "0918 ••• 405",
+    parentName: "Anh Hoàng Nam",
+    parentPhone: "0918223405",
+    parentEmail: "hoangnam.parent@example.com",
+    parentNote: "Thường đọc email công việc vào buổi trưa.",
+    privateNote: "Rất có năng khiếu phân tích luận điểm học thuật, nên khuyến khích nộp bài Research Essay vào Showcase cuối tháng.",
+    tuitionHistory: [
+      {
+        id: "pay-stu02-1",
+        period: "Học kỳ II (Tháng 11 – 01)",
+        baseAmount: 5800000,
+        discountAmount: 0,
+        paidAmount: 5800000,
+        dueDate: "2026-11-20",
+        paidAt: "2026-11-10",
+        method: "transfer",
+        status: "paid",
+        receiptCode: "PT-2611-002",
+      },
+    ],
+    communicationLogs: [],
+    classTransferHistory: [],
+    gradeChangeHistory: [],
     status: "active",
     recentComment:
       "Khả năng tổng hợp tài liệu nghiên cứu và trích dẫn dẫn chứng rất sắc sảo.",
@@ -1834,12 +2223,48 @@ export const ADMIN_STUDENTS_DATA: AdminStudentRecord[] = [
     joinedAt: "01/09/2026",
     attendanceRate: 95,
     averageScore: 6.2,
+    entryBand: 4.5,
     targetGoal: "IELTS 6.5 (Xét tuyển ĐH)",
     tuitionStatus: "due-soon",
     tuitionPeriod: "Học kỳ II (Hạn 20/11/2026)",
     tuitionAmount: "5.200.000 ₫",
+    tuitionDueDate: "2026-11-20",
     parentRelation: "Phụ huynh: Cô Thanh Mai (Mẹ)",
     parentContactMasked: "0982 ••• 119",
+    parentName: "Cô Thanh Mai",
+    parentPhone: "0982774119",
+    parentEmail: "thanhmai.ph@example.com",
+    parentNote: "Đã hẹn đóng học phí phần còn lại vào cuối tuần.",
+    privateNote: "Cần sửa kỹ phát âm âm cuối (/s/, /t/, /ed/) khi thi nói để lên band 6.5.",
+    tuitionHistory: [
+      {
+        id: "pay-stu03-2",
+        period: "Học kỳ II (Hạn 20/11/2026)",
+        baseAmount: 5200000,
+        discountAmount: 200000,
+        paidAmount: 2500000,
+        dueDate: "2026-11-20",
+        paidAt: "2026-11-05",
+        method: "transfer",
+        status: "partial",
+        receiptCode: "PT-2611-003A",
+        note: "Đã cọc đợt 1 (2.5tr), giảm 200k ưu đãi học sinh chuyên cần",
+      },
+    ],
+    communicationLogs: [
+      {
+        id: "comm-stu03-1",
+        date: "2026-11-15",
+        channel: "phone",
+        category: "tuition",
+        summary: "Nhắc lịch hoàn tất 2.500.000 đ học phí đợt 2 kỳ II trước hạn 20/11.",
+        parentResponse: "Mẹ xác nhận thứ Bảy chuyển khoản nốt phần còn lại.",
+        nextFollowUpDate: "2026-11-21",
+        loggedBy: "ThS. Nguyễn Minh Anh",
+      },
+    ],
+    classTransferHistory: [],
+    gradeChangeHistory: [],
     status: "active",
     recentComment:
       "Tăng 1.5 band kể từ đầu khóa. Cần chú ý phát âm âm cuối (ending sounds) trong Speaking.",
@@ -1879,12 +2304,35 @@ export const ADMIN_STUDENTS_DATA: AdminStudentRecord[] = [
     joinedAt: "05/08/2026",
     attendanceRate: 92,
     averageScore: 7.5,
+    entryBand: 6.0,
     targetGoal: "IELTS 7.5 Overall",
     tuitionStatus: "paid",
     tuitionPeriod: "Học kỳ II (Tháng 11 – 01)",
     tuitionAmount: "6.400.000 ₫",
+    tuitionDueDate: "2026-11-20",
     parentRelation: "Phụ huynh: Anh Minh Đức (Bố)",
     parentContactMasked: "0936 ••• 720",
+    parentName: "Anh Minh Đức",
+    parentPhone: "0936441720",
+    parentEmail: "minhduc.ph@example.com",
+    privateNote: "Lệch kỹ năng rất rõ (Reading 9.0 nhưng Writing/Speaking 6.5). Cần xếp lịch kèm 1-1 nhóm nhỏ Writing Task 2.",
+    tuitionHistory: [
+      {
+        id: "pay-stu04-1",
+        period: "Học kỳ II (Tháng 11 – 01)",
+        baseAmount: 6400000,
+        discountAmount: 0,
+        paidAmount: 6400000,
+        dueDate: "2026-11-20",
+        paidAt: "2026-11-08",
+        method: "transfer",
+        status: "paid",
+        receiptCode: "PT-2611-004",
+      },
+    ],
+    communicationLogs: [],
+    classTransferHistory: [],
+    gradeChangeHistory: [],
     status: "active",
     recentComment:
       "Đạt 9.0 Reading trong bài thi thử tuần 45. Cần phân bổ thêm thời gian luyện Speaking Part 2.",
@@ -1925,12 +2373,36 @@ export const ADMIN_STUDENTS_DATA: AdminStudentRecord[] = [
     joinedAt: "10/09/2026",
     attendanceRate: 100,
     averageScore: 8.6,
+    entryBand: 7.0,
     targetGoal: "Cambridge B1 Pass with Distinction",
     tuitionStatus: "paid",
     tuitionPeriod: "Học kỳ II (Tháng 11 – 01)",
     tuitionAmount: "4.800.000 ₫",
+    tuitionDueDate: "2026-11-25",
     parentRelation: "Phụ huynh: Chị Ngọc Lan (Mẹ)",
     parentContactMasked: "0974 ••• 338",
+    parentName: "Chị Ngọc Lan",
+    parentPhone: "0974668338",
+    parentEmail: "ngoclan.ph@example.com",
+    parentNote: "Phụ huynh rất nhiệt tình, hay tham gia các buổi showcase cuối khóa.",
+    privateNote: "Học viên nổi bật nhất khối Junior, có thể đề cử làm mẫu thuyết trình cho khóa mới.",
+    tuitionHistory: [
+      {
+        id: "pay-stu05-1",
+        period: "Học kỳ II (Tháng 11 – 01)",
+        baseAmount: 4800000,
+        discountAmount: 0,
+        paidAmount: 4800000,
+        dueDate: "2026-11-25",
+        paidAt: "2026-11-11",
+        method: "transfer",
+        status: "paid",
+        receiptCode: "PT-2611-005",
+      },
+    ],
+    communicationLogs: [],
+    classTransferHistory: [],
+    gradeChangeHistory: [],
     status: "active",
     recentComment:
       "Phong thái thuyết trình tự tin, phát âm chuẩn và luôn chủ động hỗ trợ các bạn trong nhóm.",
@@ -1965,12 +2437,45 @@ export const ADMIN_STUDENTS_DATA: AdminStudentRecord[] = [
     joinedAt: "01/09/2026",
     attendanceRate: 88,
     averageScore: 5.8,
+    entryBand: 5.0,
     targetGoal: "IELTS 6.0",
     tuitionStatus: "overdue",
     tuitionPeriod: "Học kỳ II (Quá hạn 5 ngày)",
     tuitionAmount: "5.200.000 ₫",
+    tuitionDueDate: "2026-11-20",
     parentRelation: "Phụ huynh: Anh Quốc Tuấn (Bố)",
     parentContactMasked: "0945 ••• 901",
+    parentName: "Anh Quốc Tuấn",
+    parentPhone: "0945332901",
+    parentEmail: "quoctuan.ph@example.com",
+    parentNote: "Gọi điện sau 18h vì ban ngày bố đi công tác.",
+    privateNote: "Cần theo sát bài tập về nhà mỗi tuần vì em hay quên làm phần Reading nếu không nhắc.",
+    tuitionHistory: [
+      {
+        id: "pay-stu06-2",
+        period: "Học kỳ II (Quá hạn 5 ngày)",
+        baseAmount: 5200000,
+        discountAmount: 0,
+        paidAmount: 0,
+        dueDate: "2026-11-15",
+        status: "overdue",
+        note: "Chưa thanh toán kỳ II",
+      },
+    ],
+    communicationLogs: [
+      {
+        id: "comm-stu06-1",
+        date: "2026-11-14",
+        channel: "zalo",
+        category: "attendance",
+        summary: "Gửi tài liệu học bù buổi Listening Section 3 (vắng ngày 05/11) và nhắc nộp học phí kỳ II.",
+        parentResponse: "Bố đã nhận được tài liệu, hẹn đầu tuần sau ghé lớp đóng học phí.",
+        nextFollowUpDate: "2026-11-21",
+        loggedBy: "ThS. Nguyễn Minh Anh",
+      },
+    ],
+    classTransferHistory: [],
+    gradeChangeHistory: [],
     status: "active",
     recentComment:
       "Thái độ học tập tích cực, nộp đủ bài sửa lần 2. Cần ôn tập kỹ thì Hiện tại hoàn thành và Mệnh đề quan hệ.",

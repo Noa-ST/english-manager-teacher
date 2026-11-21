@@ -17,3 +17,11 @@ export const PATCH = adminRoute<{ params: Promise<{ id: string }> }>(
     return ok(updated);
   },
 );
+
+export const DELETE = adminRoute<{ params: Promise<{ id: string }> }>(
+  async (_request, context) => {
+    const { id } = await context.params;
+    const result = await teachingJournalService.deleteClassSession(id);
+    return ok(result);
+  },
+);

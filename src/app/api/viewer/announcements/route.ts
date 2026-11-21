@@ -7,7 +7,9 @@ export const GET = publicRoute(async (request) => {
     includeDrafts: false,
     category: query.category,
     search: query.search,
+    targetClass: query.targetClass ?? query.class,
+    includeAllClassesTarget: true,
+    onlyWithAttachments: query.attachments === "true" || query.attachments === "1",
   });
   return ok(items);
 });
-

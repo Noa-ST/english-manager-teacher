@@ -8,11 +8,30 @@ import { getServerEnv } from "@/lib/env";
  * Refreshes the Supabase SSR session cookie on incoming requests inside `src/proxy.ts`.
  * Returns the updated NextResponse and the authenticated Supabase User (if any).
  */
-export async function updateSupabaseSession(request: NextRequest): Promise<{
+export async function updateSupabaseSession(
+  request: NextRequest,
+  extraRequestHeaders?: Record<string, string>,
+): Promise<{
   response: NextResponse;
   user: User | null;
 }> {
-  let response = NextResponse.next({ request });
+  const buildRequestHeaders = () => {
+    const requestHeaders = new Headers(request.headers);
+    if (extraRequestHeaders) {
+      for (const [key, value] of Object.entries(extraRequestHeaders)) {
+        requestHeaders.set(key, value);
+      }
+    }
+    const serializedCookies = request.cookies.toString();
+    if (serializedCookies) {
+      requestHeaders.set("cookie", serializedCookies);
+    }
+    return requestHeaders;
+  };
+
+  let response = NextResponse.next({
+    request: { headers: buildRequestHeaders() },
+  });
 
   const env = getServerEnv();
   if (!env.SUPABASE_URL || !env.SUPABASE_PUBLISHABLE_KEY) {
@@ -28,7 +47,9 @@ export async function updateSupabaseSession(request: NextRequest): Promise<{
         for (const { name, value } of cookiesToSet) {
           request.cookies.set(name, value);
         }
-        response = NextResponse.next({ request });
+        response = NextResponse.next({
+          request: { headers: buildRequestHeaders() },
+        });
         for (const { name, value, options } of cookiesToSet) {
           response.cookies.set(name, value, options);
         }

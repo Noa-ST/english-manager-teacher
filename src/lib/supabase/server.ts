@@ -11,7 +11,9 @@ const createServerClient =
  * Server-side Supabase SSR client (Cookie-based session, anon/publishable key).
  * Respects RLS policies for the currently authenticated user.
  */
-export async function createSupabaseServerClient(): Promise<SupabaseClient> {
+export async function createSupabaseServerClient(options?: {
+  sessionOnly?: boolean;
+}): Promise<SupabaseClient> {
   const env = getServerEnv();
   if (!env.SUPABASE_URL || !env.SUPABASE_PUBLISHABLE_KEY) {
     throw new Error("SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY must be configured.");
@@ -26,8 +28,15 @@ export async function createSupabaseServerClient(): Promise<SupabaseClient> {
       },
       setAll(cookiesToSet) {
         try {
-          for (const { name, value, options } of cookiesToSet) {
-            cookieStore.set(name, value, options);
+          for (const { name, value, options: cookieOptions } of cookiesToSet) {
+            if (options?.sessionOnly && cookieOptions && cookieOptions.maxAge !== 0) {
+              const sessionOptions = { ...cookieOptions };
+              delete sessionOptions.maxAge;
+              delete sessionOptions.expires;
+              cookieStore.set(name, value, sessionOptions);
+            } else {
+              cookieStore.set(name, value, cookieOptions);
+            }
           }
         } catch {
           // Called from a Server Component where setting cookies is a no-op;

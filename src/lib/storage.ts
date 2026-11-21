@@ -13,7 +13,7 @@ import type { FileVisibility, StorageProviderName } from "@/types";
 
 /**
  * Multi-Provider Storage Architecture:
- * - CloudinaryProvider: Images (avatars, projects, podcast thumbnails, announcements, articles, resources)
+ * - CloudinaryProvider: Images (teacher avatar, projects, podcast thumbnails, announcements, articles, resources)
  * - SupabaseStorageProvider: Podcasts (MP3/M4A) & PDFs (public & private buckets)
  * - R2S3StorageProvider: Optional S3-compatible provider (Cloudflare R2 / AWS S3) for future migration
  * - LocalStorageProvider: Safe development/test fallback
@@ -24,7 +24,6 @@ import type { FileVisibility, StorageProviderName } from "@/types";
  */
 
 export type ImageCategory =
-  | "student_avatar"
   | "teacher_avatar"
   | "project"
   | "podcast_thumbnail"
@@ -40,7 +39,6 @@ export type CloudinaryTransformPreset =
   | "preview";
 
 export const CLOUDINARY_FOLDER_MAP: Record<ImageCategory, string> = {
-  student_avatar: "english-manager/avatars/students",
   teacher_avatar: "english-manager/avatars/teachers",
   project: "english-manager/projects",
   podcast_thumbnail: "english-manager/podcasts",
@@ -174,6 +172,7 @@ export interface StorageProvider {
   upload(input: ProviderUploadInput): Promise<ProviderUploadResult>;
   createSignedUploadTicket(input: ProviderSignedUploadInput): Promise<ProviderUploadTicket>;
   delete(target: ProviderTarget): Promise<void>;
+  moveObject?(sourceBucket: string, destBucket: string, storagePath: string): Promise<void>;
   getMetadata(target: ProviderTarget): Promise<ProviderObjectMetadata | null>;
   exists(target: ProviderTarget): Promise<boolean>;
   getPublicUrl(
@@ -184,6 +183,21 @@ export interface StorageProvider {
     target: ProviderTarget,
     options?: { expiresInSeconds?: number; downloadName?: string },
   ): Promise<string>;
+}
+
+const STORAGE_FETCH_TIMEOUT_MS = 15_000;
+const MAX_MEMORY_INDEX_ENTRIES = 5_000;
+
+function setBoundedIndexEntry(
+  map: Map<string, ProviderObjectMetadata>,
+  key: string,
+  value: ProviderObjectMetadata,
+): void {
+  if (map.size >= MAX_MEMORY_INDEX_ENTRIES && !map.has(key)) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
 }
 
 // -----------------------------------------------------------------------------
@@ -274,6 +288,7 @@ export class CloudinaryProvider implements StorageProvider {
         {
           method: "POST",
           body: form,
+          signal: AbortSignal.timeout(STORAGE_FETCH_TIMEOUT_MS),
         },
       );
 
@@ -298,7 +313,7 @@ export class CloudinaryProvider implements StorageProvider {
         mimeType: input.contentType,
         updatedAt: new Date().toISOString(),
       };
-      this.memoryIndex.set(resolvedPublicId, meta);
+      setBoundedIndexEntry(this.memoryIndex, resolvedPublicId, meta);
 
       return {
         provider: "cloudinary",
@@ -325,7 +340,7 @@ export class CloudinaryProvider implements StorageProvider {
       mimeType: input.contentType,
       updatedAt: new Date().toISOString(),
     };
-    this.memoryIndex.set(fullPublicId, meta);
+    setBoundedIndexEntry(this.memoryIndex, fullPublicId, meta);
 
     return {
       provider: "cloudinary",
@@ -342,6 +357,9 @@ export class CloudinaryProvider implements StorageProvider {
     input: ProviderSignedUploadInput,
   ): Promise<ProviderUploadTicket> {
     const env = getServerEnv();
+    if (env.NODE_ENV === "production" && !env.CLOUDINARY_API_SECRET.trim()) {
+      throw new Error("CLOUDINARY_API_SECRET chưa được cấu hình ở môi trường production.");
+    }
     const publicId = input.cloudinaryPublicId ?? input.storagePath.replace(/\.[^.]+$/, "");
     const folder =
       input.cloudinaryFolder ??
@@ -416,11 +434,22 @@ export class CloudinaryProvider implements StorageProvider {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: body.toString(),
+          signal: AbortSignal.timeout(STORAGE_FETCH_TIMEOUT_MS),
         },
       );
 
       if (!response.ok) {
         throw new Error(`Cloudinary destroy failed with HTTP ${response.status}`);
+      }
+      const destroyJson = (await response.json().catch(() => null)) as {
+        result?: string;
+      } | null;
+      if (
+        destroyJson?.result &&
+        destroyJson.result !== "ok" &&
+        destroyJson.result !== "not found"
+      ) {
+        throw new Error(`Cloudinary destroy returned status "${destroyJson.result}"`);
       }
     }
 
@@ -507,6 +536,7 @@ export class SupabaseStorageProvider implements StorageProvider {
           "x-upsert": input.allowOverwrite ? "true" : "false",
         },
         body: new Uint8Array(input.body),
+        signal: AbortSignal.timeout(STORAGE_FETCH_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -532,7 +562,7 @@ export class SupabaseStorageProvider implements StorageProvider {
       mimeType: input.contentType,
       updatedAt: new Date().toISOString(),
     };
-    this.memoryIndex.set(mapKey, meta);
+    setBoundedIndexEntry(this.memoryIndex, mapKey, meta);
 
     return {
       provider: "supabase",
@@ -566,6 +596,7 @@ export class SupabaseStorageProvider implements StorageProvider {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({}),
+        signal: AbortSignal.timeout(STORAGE_FETCH_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -623,6 +654,7 @@ export class SupabaseStorageProvider implements StorageProvider {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ prefixes: [cleanPath] }),
+        signal: AbortSignal.timeout(STORAGE_FETCH_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -631,6 +663,54 @@ export class SupabaseStorageProvider implements StorageProvider {
     }
 
     this.memoryIndex.delete(mapKey);
+  }
+
+  async moveObject(
+    sourceBucket: string,
+    destBucket: string,
+    storagePath: string,
+  ): Promise<void> {
+    const env = getServerEnv();
+    const cleanPath = storagePath.replace(/^\/+/, "");
+    if (sourceBucket === destBucket) return;
+
+    if (this.isConfigured() && typeof fetch === "function") {
+      const baseUrl = this.getBaseUrl();
+      const copyRes = await fetch(`${baseUrl}/storage/v1/object/copy`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.SUPABASE_SECRET_KEY}`,
+          apikey: env.SUPABASE_SECRET_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          bucketId: sourceBucket,
+          sourceKey: cleanPath,
+          destinationBucket: destBucket,
+          destinationKey: cleanPath,
+        }),
+        signal: AbortSignal.timeout(STORAGE_FETCH_TIMEOUT_MS),
+      });
+      if (!copyRes.ok) {
+        throw new Error(`Supabase move/copy object failed with HTTP ${copyRes.status}`);
+      }
+      await this.delete({
+        bucket: sourceBucket,
+        storagePath: cleanPath,
+        visibility: "private",
+      });
+    }
+
+    const oldKey = `${sourceBucket}:${cleanPath}`;
+    const existing = this.memoryIndex.get(oldKey);
+    if (existing) {
+      this.memoryIndex.delete(oldKey);
+      setBoundedIndexEntry(this.memoryIndex, `${destBucket}:${cleanPath}`, {
+        ...existing,
+        bucketName: destBucket,
+        updatedAt: new Date().toISOString(),
+      });
+    }
   }
 
   async getMetadata(target: ProviderTarget): Promise<ProviderObjectMetadata | null> {
@@ -679,6 +759,7 @@ export class SupabaseStorageProvider implements StorageProvider {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ expiresIn }),
+        signal: AbortSignal.timeout(STORAGE_FETCH_TIMEOUT_MS),
       });
 
       if (!response.ok) {

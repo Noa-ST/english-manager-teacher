@@ -1,420 +1,512 @@
 "use client";
 
 import * as React from "react";
+import { useSearchParams } from "next/navigation";
 import {
-  CheckCircle2,
-  Cloud,
-  Globe,
-  KeyRound,
-  Palette,
+  Activity,
+  RefreshCw,
+  RotateCcw,
   Save,
   ShieldCheck,
   UserCheck,
+  Users,
 } from "lucide-react";
-import { TEACHER_PROFILE } from "@/services/classroom-data";
+import type { SettingsAuditLogEntry } from "@/services/classroom-data";
+import {
+  buildSnapshotFilename,
+  SETTINGS_UPDATED_EVENT,
+  type SettingsAdminTab,
+  type SettingsFormDraft,
+} from "@/services/settings-helpers";
+import type { SystemHealthSummary } from "@/services/settings.service";
+import type { StorageHealthStatus } from "@/services/storage.service";
 import { apiRequest } from "@/lib/api-client";
+import { SettingsBrandTab } from "@/components/admin/settings/settings-brand-tab";
+import { SettingsOperationsTab } from "@/components/admin/settings/settings-operations-tab";
+import { SettingsSystemTab } from "@/components/admin/settings/settings-system-tab";
 import { StudentAccountManager } from "@/components/admin/student-account-manager";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/feedback";
 import { useToast } from "@/components/ui/toast";
+import { cn } from "@/lib/utils";
 
-export default function AdminSettingsPage() {
+interface SettingsApiResponse extends SettingsFormDraft {
+  storageStatus?: StorageHealthStatus;
+  health?: SystemHealthSummary;
+  auditLogs?: SettingsAuditLogEntry[];
+}
+
+const VALID_TABS: readonly SettingsAdminTab[] = [
+  "brand",
+  "operations",
+  "accounts",
+  "system",
+];
+
+function parseTabParam(raw: string | null): SettingsAdminTab {
+  if (raw && (VALID_TABS as readonly string[]).includes(raw)) {
+    return raw as SettingsAdminTab;
+  }
+  return "brand";
+}
+
+function createDefaultDraft(): SettingsFormDraft {
+  return {
+    name: "",
+    title: "",
+    slogan: "",
+    shortBio: "",
+    philosophy: "",
+    experienceYears: 0,
+    totalStudents: 0,
+    bandAchievementRate: "",
+    email: "",
+    avatarUrl: "/images/teacher-avatar.jpg",
+    officeHours: "",
+    location: "",
+    credentials: [],
+    socials: [],
+    currentTerm: "Học kỳ I · Năm học 2026–2027",
+    defaultPortalPin: "123456",
+    autoNotifyParents: true,
+    presignedExpirySeconds: 900,
+    lowAttendanceThresholdPercent: 90,
+    tuitionReminderDaysBefore: 7,
+    requirePortalVerification: true,
+  };
+}
+
+function extractDraftFromApi(res: SettingsApiResponse): SettingsFormDraft {
+  const defaults = createDefaultDraft();
+  return {
+    name: res.name ?? defaults.name,
+    title: res.title ?? defaults.title,
+    slogan: res.slogan ?? defaults.slogan,
+    shortBio: res.shortBio ?? defaults.shortBio,
+    philosophy: res.philosophy ?? defaults.philosophy,
+    experienceYears: res.experienceYears ?? defaults.experienceYears,
+    totalStudents: res.totalStudents ?? defaults.totalStudents,
+    bandAchievementRate:
+      res.bandAchievementRate ?? defaults.bandAchievementRate,
+    email: res.email ?? defaults.email,
+    avatarUrl: res.avatarUrl ?? defaults.avatarUrl,
+    officeHours: res.officeHours ?? defaults.officeHours,
+    location: res.location ?? defaults.location,
+    credentials: Array.isArray(res.credentials)
+      ? [...res.credentials]
+      : defaults.credentials,
+    socials: Array.isArray(res.socials)
+      ? res.socials.map((s) => ({ ...s }))
+      : defaults.socials,
+    currentTerm: res.currentTerm ?? defaults.currentTerm,
+    defaultPortalPin: res.defaultPortalPin ?? defaults.defaultPortalPin,
+    autoNotifyParents: res.autoNotifyParents ?? defaults.autoNotifyParents,
+    presignedExpirySeconds:
+      res.presignedExpirySeconds ?? defaults.presignedExpirySeconds,
+    lowAttendanceThresholdPercent:
+      res.lowAttendanceThresholdPercent ??
+      defaults.lowAttendanceThresholdPercent,
+    tuitionReminderDaysBefore:
+      res.tuitionReminderDaysBefore ?? defaults.tuitionReminderDaysBefore,
+    requirePortalVerification: true,
+  };
+}
+
+function SettingsWorkspaceContent() {
+  const searchParams = useSearchParams();
   const { toast } = useToast();
 
-  // Teacher Brand Profile state
-  const [teacherName, setTeacherName] = React.useState(TEACHER_PROFILE.name);
-  const [teacherTitle, setTeacherTitle] = React.useState(TEACHER_PROFILE.title);
-  const [slogan, setSlogan] = React.useState(TEACHER_PROFILE.slogan);
-  const [shortBio, setShortBio] = React.useState(TEACHER_PROFILE.shortBio);
-  const [officeHours, setOfficeHours] = React.useState(
-    TEACHER_PROFILE.officeHours,
+  const rawTabParam = searchParams.get("tab");
+  const [prevTabParam, setPrevTabParam] = React.useState(rawTabParam);
+  const [activeTab, setActiveTab] = React.useState<SettingsAdminTab>(() =>
+    parseTabParam(rawTabParam),
   );
-  const [location, setLocation] = React.useState(TEACHER_PROFILE.location);
+  if (rawTabParam !== prevTabParam) {
+    setPrevTabParam(rawTabParam);
+    setActiveTab(parseTabParam(rawTabParam));
+  }
 
-  // Academic & Portal Access Settings
-  const [currentTerm, setCurrentTerm] = React.useState(
-    "Học kỳ I · Năm học 2026–2027",
+  const [draft, setDraft] = React.useState<SettingsFormDraft>(() =>
+    createDefaultDraft(),
   );
-  const [defaultPortalPin, setDefaultPortalPin] = React.useState("123456");
-  const [autoNotifyParents, setAutoNotifyParents] = React.useState(true);
-  const [presignedExpirySeconds, setPresignedExpirySeconds] =
-    React.useState("900");
+  const [savedDraft, setSavedDraft] = React.useState<SettingsFormDraft>(() =>
+    createDefaultDraft(),
+  );
+  const [storageStatus, setStorageStatus] =
+    React.useState<StorageHealthStatus | null>(null);
+  const [health, setHealth] = React.useState<SystemHealthSummary | null>(null);
+  const [auditLogs, setAuditLogs] = React.useState<SettingsAuditLogEntry[]>(
+    [],
+  );
+
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [isRefreshing, setIsRefreshing] = React.useState(false);
+  const [isSaving, setIsSaving] = React.useState(false);
+  const [isResetting, setIsResetting] = React.useState(false);
+  const [isExporting, setIsExporting] = React.useState(false);
+
+  const isDirty = React.useMemo(
+    () => JSON.stringify(draft) !== JSON.stringify(savedDraft),
+    [draft, savedDraft],
+  );
+
+  const applyApiResponse = React.useCallback(
+    (res: SettingsApiResponse, resetDraft = true) => {
+      const nextDraft = extractDraftFromApi(res);
+      setSavedDraft(nextDraft);
+      if (resetDraft) {
+        setDraft(nextDraft);
+      }
+      setStorageStatus(res.storageStatus ?? null);
+      setHealth(res.health ?? null);
+      setAuditLogs(res.auditLogs ?? []);
+    },
+    [],
+  );
 
   React.useEffect(() => {
-    apiRequest<{
-      name: string;
-      title: string;
-      slogan: string;
-      shortBio: string;
-      officeHours: string;
-      location: string;
-      currentTerm: string;
-      defaultPortalPin: string;
-      autoNotifyParents: boolean;
-      presignedExpirySeconds: number;
-    }>("/api/admin/settings")
-      .then((res) => {
-        setTeacherName(res.name);
-        setTeacherTitle(res.title);
-        setSlogan(res.slogan);
-        setShortBio(res.shortBio);
-        setOfficeHours(res.officeHours);
-        setLocation(res.location);
-        setCurrentTerm(res.currentTerm);
-        setDefaultPortalPin(res.defaultPortalPin);
-        setAutoNotifyParents(res.autoNotifyParents);
-        setPresignedExpirySeconds(String(res.presignedExpirySeconds));
-      })
-      .catch(() => {});
-  }, []);
+    let active = true;
 
-  const handleSaveSettings = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      await apiRequest("/api/admin/settings", {
-        method: "PUT",
-        body: JSON.stringify({
-          name: teacherName,
-          title: teacherTitle,
-          slogan,
-          shortBio,
-          officeHours,
-          location,
-          currentTerm,
-          defaultPortalPin,
-          autoNotifyParents,
-          presignedExpirySeconds: Number(presignedExpirySeconds) || 900,
-        }),
+    apiRequest<SettingsApiResponse>("/api/admin/settings")
+      .then((res) => {
+        if (!active) return;
+        applyApiResponse(res, true);
+      })
+      .catch((err) => {
+        if (!active) return;
+        toast({
+          title: "Không thể tải cấu hình hệ thống",
+          description:
+            err instanceof Error
+              ? err.message
+              : "Đã xảy ra lỗi khi kết nối API cài đặt.",
+          variant: "error",
+        });
+      })
+      .finally(() => {
+        if (!active) return;
+        setIsLoading(false);
       });
-    } catch {
-      // Fallback
+
+    return () => {
+      active = false;
+    };
+  }, [applyApiResponse, toast]);
+
+  const refreshSettings = React.useCallback(() => {
+    setIsRefreshing(true);
+    apiRequest<SettingsApiResponse>("/api/admin/settings")
+      .then((res) => {
+        applyApiResponse(res, !isDirty);
+      })
+      .catch((err) => {
+        toast({
+          title: "Làm mới cấu hình thất bại",
+          description:
+            err instanceof Error ? err.message : "Không thể đồng bộ dữ liệu.",
+          variant: "error",
+        });
+      })
+      .finally(() => {
+        setIsRefreshing(false);
+      });
+  }, [applyApiResponse, isDirty, toast]);
+
+  const handleSaveSettings = async () => {
+    setIsSaving(true);
+    try {
+      const payload = {
+        ...draft,
+        credentials: draft.credentials.map((c) => c.trim()).filter(Boolean),
+        socials: draft.socials.filter(
+          (s) => s.label.trim() && s.href.trim() && s.handle.trim(),
+        ),
+        requirePortalVerification: true as const,
+      };
+      const res = await apiRequest<SettingsApiResponse>("/api/admin/settings", {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      applyApiResponse(res, true);
+      window.dispatchEvent(
+        new CustomEvent(SETTINGS_UPDATED_EVENT, { detail: res }),
+      );
+      toast({
+        title: "Đã lưu cấu hình hệ thống",
+        description:
+          "Hồ sơ thương hiệu, quy tắc học vụ, bảo mật PIN và TTL Signed URL đã được đồng bộ toàn hệ thống.",
+        variant: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Không thể lưu cài đặt hệ thống",
+        description:
+          err instanceof Error
+            ? err.message
+            : "Vui lòng kiểm tra lại các trường nhập liệu.",
+        variant: "error",
+      });
+    } finally {
+      setIsSaving(false);
     }
-    toast({
-      title: "Đã lưu cấu hình hệ thống",
-      description:
-        "Thông tin thương hiệu cá nhân và thiết lập bảo mật Cổng học sinh đã được cập nhật.",
-      variant: "success",
-    });
   };
 
+  const handleResetSettings = async () => {
+    setIsResetting(true);
+    try {
+      const res = await apiRequest<SettingsApiResponse>("/api/admin/settings", {
+        method: "POST",
+        body: JSON.stringify({ action: "reset" }),
+      });
+      applyApiResponse(res, true);
+      window.dispatchEvent(
+        new CustomEvent(SETTINGS_UPDATED_EVENT, { detail: res }),
+      );
+      toast({
+        title: "Đã khôi phục cài đặt mặc định",
+        description:
+          "Thương hiệu, học kỳ, PIN mặc định và ngưỡng cảnh báo đã trở về thiết lập ban đầu.",
+        variant: "info",
+      });
+    } catch (err) {
+      toast({
+        title: "Khôi phục cài đặt thất bại",
+        description: err instanceof Error ? err.message : "Đã xảy ra lỗi.",
+        variant: "error",
+      });
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  const handleExportSnapshot = async () => {
+    setIsExporting(true);
+    try {
+      const res = await apiRequest<{
+        snapshot: unknown;
+        auditLogs?: SettingsAuditLogEntry[];
+      }>("/api/admin/settings", {
+        method: "POST",
+        body: JSON.stringify({ action: "exportSnapshot" }),
+      });
+
+      const blob = new Blob([JSON.stringify(res.snapshot, null, 2)], {
+        type: "application/json;charset=utf-8;",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = buildSnapshotFilename();
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+
+      if (res.auditLogs) {
+        setAuditLogs(res.auditLogs);
+      }
+
+      toast({
+        title: "Đã xuất bản sao lưu hệ thống",
+        description: `Tệp ${buildSnapshotFilename()} đã tải xuống (đã ẩn mã PIN bảo mật).`,
+        variant: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Xuất bản sao lưu thất bại",
+        description: err instanceof Error ? err.message : "Đã xảy ra lỗi.",
+        variant: "error",
+      });
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const tabs: Array<{
+    id: SettingsAdminTab;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    hasWarningDot?: boolean;
+  }> = [
+    {
+      id: "brand",
+      label: "Thương hiệu & Hồ sơ",
+      icon: UserCheck,
+    },
+    {
+      id: "operations",
+      label: "Học vụ, Bảo mật & Lưu trữ",
+      icon: ShieldCheck,
+    },
+    {
+      id: "accounts",
+      label: "Tài khoản Học sinh (RBAC)",
+      icon: Users,
+    },
+    {
+      id: "system",
+      label: "Hệ thống, Sao lưu & Audit Log",
+      icon: Activity,
+      hasWarningDot: health?.overallStatus === "warning",
+    },
+  ];
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-        <div>
-          <h1 className="font-heading text-2xl font-bold text-foreground sm:text-3xl">
-            Cài đặt Hệ thống & Thương hiệu Giáo viên
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Quản lý hồ sơ thương hiệu cá nhân trên Public Portal, cấu hình học kỳ và bảo mật
-            Cloudflare R2.
+      <div className="flex flex-col gap-4 rounded-2xl border border-border bg-card p-6 shadow-xs lg:flex-row lg:items-center lg:justify-between">
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="font-heading text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
+              Cài đặt Hệ thống &amp; Thương hiệu Giáo viên
+            </h1>
+            {isDirty && (
+              <Badge variant="warning" className="text-xs">
+                Có thay đổi chưa lưu
+              </Badge>
+            )}
+          </div>
+          <p className="max-w-3xl text-sm text-muted-foreground">
+            Quản lý một nguồn sự thật duy nhất cho Hồ sơ công khai, Học kỳ, Bảo mật PIN Cổng học sinh, thời hạn Signed URL và Tài khoản RBAC.
           </p>
         </div>
 
-        <Button onClick={handleSaveSettings}>
-          <Save className="size-4" aria-hidden="true" />
-          Lưu toàn bộ cài đặt
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={refreshSettings}
+            disabled={isLoading || isRefreshing}
+          >
+            <RefreshCw
+              className={cn("size-4", isRefreshing && "animate-spin")}
+              aria-hidden="true"
+            />
+            Làm mới
+          </Button>
+          {isDirty && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDraft(savedDraft)}
+              disabled={isSaving}
+            >
+              <RotateCcw className="size-4" aria-hidden="true" />
+              Hoàn tác
+            </Button>
+          )}
+          <Button
+            type="button"
+            onClick={() => void handleSaveSettings()}
+            disabled={isLoading || isSaving || !isDirty}
+          >
+            <Save className="size-4" aria-hidden="true" />
+            {isSaving ? "Đang lưu..." : "Lưu thay đổi"}
+          </Button>
+        </div>
       </div>
 
-      <form onSubmit={handleSaveSettings} className="grid gap-6 lg:grid-cols-12">
-        {/* Left Column: Teacher Personal Branding (7 cols) */}
-        <div className="space-y-6 lg:col-span-7">
-          <section className="rounded-2xl border border-border bg-card p-6 shadow-2xs">
-            <div className="flex items-center justify-between border-b border-border pb-4">
-              <div className="flex items-center gap-2.5">
-                <div className="flex size-9 items-center justify-center rounded-xl bg-warm text-primary">
-                  <UserCheck className="size-4" aria-hidden="true" />
-                </div>
-                <div>
-                  <h2 className="font-heading text-base font-bold text-foreground">
-                    Hồ sơ Thương hiệu Giáo viên (Public Branding)
-                  </h2>
-                  <p className="text-xs text-muted-foreground">
-                    Hiển thị trực tiếp tại Hero Section và Footer của Cổng thông tin công khai.
-                  </p>
-                </div>
-              </div>
-              <Badge variant="warm">Modern Academic</Badge>
-            </div>
-
-            <div className="mt-5 space-y-4">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="set-name"
-                    className="block text-xs font-semibold text-foreground"
-                  >
-                    Họ tên & Học vị hiển thị
-                  </label>
-                  <Input
-                    id="set-name"
-                    value={teacherName}
-                    onChange={(e) => setTeacherName(e.target.value)}
-                    required
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="set-title"
-                    className="block text-xs font-semibold text-foreground"
-                  >
-                    Danh xưng chuyên môn
-                  </label>
-                  <Input
-                    id="set-title"
-                    value={teacherTitle}
-                    onChange={(e) => setTeacherTitle(e.target.value)}
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <label
-                  htmlFor="set-slogan"
-                  className="block text-xs font-semibold text-foreground"
-                >
-                  Thông điệp sư phạm chủ đạo (Hero Headline)
-                </label>
-                <Input
-                  id="set-slogan"
-                  value={slogan}
-                  onChange={(e) => setSlogan(e.target.value)}
-                  required
+      {/* Navigation Tabs */}
+      <div
+        role="tablist"
+        aria-label="Phân hệ cài đặt hệ thống"
+        className="flex flex-wrap gap-2 rounded-2xl border border-border bg-muted/40 p-1.5"
+      >
+        {tabs.map((tab) => {
+          const Icon = tab.icon;
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => setActiveTab(tab.id)}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition-all",
+                isActive
+                  ? "bg-card text-foreground shadow-xs ring-1 ring-border"
+                  : "text-muted-foreground hover:bg-card/60 hover:text-foreground",
+              )}
+            >
+              <Icon className="size-4 shrink-0" aria-hidden="true" />
+              <span>{tab.label}</span>
+              {tab.hasWarningDot && (
+                <span
+                  aria-label="Có khuyến nghị bảo mật"
+                  className="size-2 rounded-full bg-amber-500"
                 />
-              </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
 
-              <div className="space-y-1.5">
-                <label
-                  htmlFor="set-bio"
-                  className="block text-xs font-semibold text-foreground"
-                >
-                  Giới thiệu ngắn (Editorial Bio)
-                </label>
-                <textarea
-                  id="set-bio"
-                  rows={3}
-                  value={shortBio}
-                  onChange={(e) => setShortBio(e.target.value)}
-                  className="w-full rounded-xl border border-input bg-background p-3 text-xs leading-relaxed text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                />
-              </div>
-
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="set-hours"
-                    className="block text-xs font-semibold text-foreground"
-                  >
-                    Khung giờ tư vấn 1:1 (Office Hours)
-                  </label>
-                  <Input
-                    id="set-hours"
-                    value={officeHours}
-                    onChange={(e) => setOfficeHours(e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="set-loc"
-                    className="block text-xs font-semibold text-foreground"
-                  >
-                    Địa điểm phòng học
-                  </label>
-                  <Input
-                    id="set-loc"
-                    value={location}
-                    onChange={(e) => setLocation(e.target.value)}
-                  />
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Design System Token Preview */}
-          <section className="rounded-2xl border border-border bg-card p-6 shadow-2xs">
-            <div className="flex items-center gap-2.5 border-b border-border pb-4">
-              <div className="flex size-9 items-center justify-center rounded-xl bg-secondary/50 text-primary">
-                <Palette className="size-4" aria-hidden="true" />
-              </div>
-              <div>
-                <h2 className="font-heading text-base font-bold text-foreground">
-                  Hệ thống Bảng màu Thương hiệu (Design System Tokens)
-                </h2>
-                <p className="text-xs text-muted-foreground">
-                  Phong cách Modern Academic — Friendly & Premium đang được kích hoạt.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-4 grid grid-cols-3 gap-3 sm:grid-cols-5">
-              {[
-                { name: "Navy Primary", hex: "#243B64", bg: "bg-[#243B64]" },
-                { name: "Blue Accent", hex: "#6C8FE6", bg: "bg-[#6C8FE6]" },
-                { name: "Sky Secondary", hex: "#B9D8F5", bg: "bg-[#B9D8F5]" },
-                { name: "Warm Cream", hex: "#F5EEDC", bg: "bg-[#F5EEDC]" },
-                { name: "Coral Highlight", hex: "#F3A98B", bg: "bg-[#F3A98B]" },
-              ].map((sw) => (
-                <div
-                  key={sw.hex}
-                  className="rounded-xl border border-border bg-background p-2.5 text-center"
-                >
-                  <div
-                    className={`mx-auto h-8 w-full rounded-lg border border-black/10 ${sw.bg}`}
-                  />
-                  <p className="mt-1.5 text-[11px] font-semibold text-foreground">
-                    {sw.name}
-                  </p>
-                  <p className="font-mono text-[10px] text-muted-foreground">
-                    {sw.hex}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </section>
-        </div>
-
-        {/* Right Column: Security, Portal Access & Cloud R2 (5 cols) */}
-        <div className="space-y-6 lg:col-span-5">
-          {/* Student Portal Privacy & Auth */}
-          <section className="rounded-2xl border border-border bg-card p-6 shadow-2xs">
-            <div className="flex items-center gap-2.5 border-b border-border pb-4">
-              <div className="flex size-9 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-                <KeyRound className="size-4" aria-hidden="true" />
-              </div>
-              <div>
-                <h2 className="font-heading text-base font-bold text-foreground">
-                  Bảo mật Cổng tra cứu Học sinh
-                </h2>
-                <p className="text-xs text-muted-foreground">
-                  Quy tắc bảo vệ quyền riêng tư học vụ (Privacy-by-Design).
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-4 space-y-4">
-              <div className="space-y-1.5">
-                <label
-                  htmlFor="set-term"
-                  className="block text-xs font-semibold text-foreground"
-                >
-                  Học kỳ vận hành hiện tại
-                </label>
-                <Input
-                  id="set-term"
-                  value={currentTerm}
-                  onChange={(e) => setCurrentTerm(e.target.value)}
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label
-                  htmlFor="set-pin"
-                  className="block text-xs font-semibold text-foreground"
-                >
-                  Mật khẩu tra cứu mặc định khi khởi tạo Mã HS mới
-                </label>
-                <Input
-                  id="set-pin"
-                  type="text"
-                  value={defaultPortalPin}
-                  onChange={(e) => setDefaultPortalPin(e.target.value)}
-                  className="font-mono"
-                />
-              </div>
-
-              <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border bg-background p-3.5 text-xs">
-                <input
-                  type="checkbox"
-                  checked={autoNotifyParents}
-                  onChange={(e) => setAutoNotifyParents(e.target.checked)}
-                  className="mt-0.5 size-4 rounded border-input accent-primary"
-                />
-                <span>
-                  <strong className="font-semibold text-foreground">
-                    Bắt buộc xác thực 2 lớp (Mã HS + Mật khẩu)
-                  </strong>
-                  <span className="mt-0.5 block text-muted-foreground">
-                    Tuyệt đối không hiển thị điểm số, chuyên cần hoặc học phí trước khi xác thực
-                    thành công.
-                  </span>
-                </span>
-              </label>
-            </div>
-          </section>
-
-          {/* Cloud Storage S3 / R2 Config */}
-          <section className="rounded-2xl border border-border bg-card p-6 shadow-2xs">
-            <div className="flex items-center justify-between border-b border-border pb-4">
-              <div className="flex items-center gap-2.5">
-                <div className="flex size-9 items-center justify-center rounded-xl bg-warm text-primary">
-                  <Cloud className="size-4" aria-hidden="true" />
-                </div>
-                <div>
-                  <h2 className="font-heading text-base font-bold text-foreground">
-                    Cấu hình Cloud Object Storage
-                  </h2>
-                  <p className="text-xs text-muted-foreground">
-                    Cloudflare R2 / AWS S3 Presigned URL
-                  </p>
-                </div>
-              </div>
-              <Badge variant="success">Đang hoạt động</Badge>
-            </div>
-
-            <div className="mt-4 space-y-3 text-xs">
-              <div className="flex items-center justify-between rounded-xl bg-background p-3">
-                <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-                  <Globe className="size-3.5 text-primary" aria-hidden="true" />
-                  Public Bucket
-                </span>
-                <span className="font-mono font-semibold text-foreground">
-                  english-portal-public
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between rounded-xl bg-background p-3">
-                <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-                  <ShieldCheck className="size-3.5 text-primary" aria-hidden="true" />
-                  Private Bucket
-                </span>
-                <span className="font-mono font-semibold text-foreground">
-                  english-portal-private
-                </span>
-              </div>
-
-              <div className="space-y-1.5 pt-1">
-                <label
-                  htmlFor="set-expiry"
-                  className="block text-xs font-semibold text-foreground"
-                >
-                  Thời hạn hiệu lực Presigned URL (Giây)
-                </label>
-                <Input
-                  id="set-expiry"
-                  type="number"
-                  value={presignedExpirySeconds}
-                  onChange={(e) => setPresignedExpirySeconds(e.target.value)}
-                  className="font-mono"
-                />
-              </div>
-            </div>
-          </section>
-
-          <div className="flex justify-end">
-            <Button type="submit" size="lg" className="w-full">
-              <CheckCircle2 className="size-4" aria-hidden="true" />
-              Lưu toàn bộ thiết lập hệ thống
-            </Button>
+      {/* Tab Content */}
+      {isLoading ? (
+        <div className="grid gap-6 lg:grid-cols-12">
+          <div className="space-y-4 lg:col-span-7">
+            <Skeleton className="h-80 w-full rounded-2xl" />
+            <Skeleton className="h-52 w-full rounded-2xl" />
+          </div>
+          <div className="space-y-4 lg:col-span-5">
+            <Skeleton className="h-64 w-full rounded-2xl" />
+            <Skeleton className="h-64 w-full rounded-2xl" />
           </div>
         </div>
-      </form>
+      ) : (
+        <>
+          {activeTab === "brand" && (
+            <SettingsBrandTab draft={draft} onChange={setDraft} />
+          )}
 
-      <StudentAccountManager />
+          {activeTab === "operations" && (
+            <SettingsOperationsTab
+              draft={draft}
+              onChange={setDraft}
+              storageStatus={storageStatus}
+            />
+          )}
+
+          {activeTab === "accounts" && (
+            <StudentAccountManager onAccountMutated={refreshSettings} />
+          )}
+
+          {activeTab === "system" && (
+            <SettingsSystemTab
+              health={health}
+              auditLogs={auditLogs}
+              onResetSettings={handleResetSettings}
+              onExportSnapshot={handleExportSnapshot}
+              isResetting={isResetting}
+              isExporting={isExporting}
+            />
+          )}
+        </>
+      )}
     </div>
+  );
+}
+
+export default function AdminSettingsPage() {
+  return (
+    <React.Suspense
+      fallback={
+        <div className="space-y-6">
+          <div className="rounded-2xl border border-border bg-card p-6">
+            <p className="text-sm text-muted-foreground">
+              Đang tải phân hệ Cài đặt Hệ thống &amp; Thương hiệu...
+            </p>
+          </div>
+          <div className="grid gap-6 lg:grid-cols-12">
+            <Skeleton className="h-80 w-full rounded-2xl lg:col-span-7" />
+            <Skeleton className="h-80 w-full rounded-2xl lg:col-span-5" />
+          </div>
+        </div>
+      }
+    >
+      <SettingsWorkspaceContent />
+    </React.Suspense>
   );
 }

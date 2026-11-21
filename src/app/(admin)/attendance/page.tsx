@@ -2,202 +2,233 @@
 
 import * as React from "react";
 import { useSearchParams } from "next/navigation";
-import {
-  CheckCheck,
-  CheckCircle2,
-  Clock,
-  Save,
-  UserCheck,
-  UserMinus,
-  UserX,
-} from "lucide-react";
-import {
-  ADMIN_STUDENTS_DATA,
-  CLASSROOMS_DATA,
-  WEEKLY_SCHEDULE_DATA,
-  type AdminStudentRecord,
-  type ClassroomGroup,
-  type WeeklyClassSession,
-} from "@/services/classroom-data";
+import { Grid3X3, Save, UserCheck } from "lucide-react";
+
 import { apiRequest } from "@/lib/api-client";
-import { Badge } from "@/components/ui/badge";
+import { useTodayIso } from "@/lib/use-today-iso";
+import {
+  computeAttendanceStats,
+  formatAttendanceDateVi,
+  type AttendanceSnapshotResult,
+  type AttendanceStatusValue,
+  type PendingAttendanceItem,
+} from "@/services/attendance-helpers";
+import type {
+  AdminStudentRecord,
+  ClassroomGroup,
+  WeeklyClassSession,
+} from "@/services/classroom-data";
+import { AttendanceKpiStrip } from "@/components/admin/attendance/attendance-kpi-strip";
+import { AttendanceMatrixTab } from "@/components/admin/attendance/attendance-matrix-tab";
+import { AttendanceParentNoticeModal } from "@/components/admin/attendance/attendance-parent-notice-modal";
+import { AttendancePendingQueue } from "@/components/admin/attendance/attendance-pending-queue";
+import {
+  AttendanceRosterPanel,
+  type StudentAttendanceRowItem,
+} from "@/components/admin/attendance/attendance-roster-panel";
 import { Button } from "@/components/ui/button";
-import { PaginationBar } from "@/components/ui/feedback";
+import { Skeleton } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
-import { cn } from "@/lib/utils";
 
-type AttendanceStatus = "present" | "late" | "absent" | "excused";
-
-interface StudentAttendanceEntry {
-  studentId: string;
-  code: string;
-  fullName: string;
-  status: AttendanceStatus;
-  note: string;
+interface AttendanceGetResponse {
+  classes: ClassroomGroup[];
+  sessions: WeeklyClassSession[];
+  students: AdminStudentRecord[];
+  snapshot: AttendanceSnapshotResult | null;
+  pendingQueue: PendingAttendanceItem[];
 }
 
-const STATUS_OPTIONS: {
-  value: AttendanceStatus;
-  label: string;
-  activeClass: string;
-}[] = [
-  {
-    value: "present",
-    label: "Có mặt",
-    activeClass: "bg-emerald-600 text-white border-emerald-600",
-  },
-  {
-    value: "late",
-    label: "Đi muộn",
-    activeClass: "bg-amber-500 text-white border-amber-500",
-  },
-  {
-    value: "absent",
-    label: "Vắng mặt",
-    activeClass: "bg-destructive text-white border-destructive",
-  },
-  {
-    value: "excused",
-    label: "Có phép",
-    activeClass: "bg-primary text-primary-foreground border-primary",
-  },
-];
-
-function mergeClassesWithDefaults(cached: ClassroomGroup[]): ClassroomGroup[] {
-  const map = new Map<string, ClassroomGroup>();
-  for (const c of CLASSROOMS_DATA) {
-    map.set(c.id, c);
-  }
-  for (const c of cached) {
-    map.set(c.id, c);
-  }
-  return Array.from(map.values());
-}
-
-export default function AdminAttendancePage() {
+function AttendanceWorkspace() {
   const { toast } = useToast();
   const searchParams = useSearchParams();
-  const initialClassId = searchParams.get("classId") ?? "all";
-  const [selectedClassId, setSelectedClassId] = React.useState<string>(initialClassId);
-  const [page, setPage] = React.useState(1);
-  const [pageSize, setPageSize] = React.useState(10);
 
-  const [classes, setClasses] = React.useState<ClassroomGroup[]>(CLASSROOMS_DATA);
-  const [sessions, setSessions] = React.useState<WeeklyClassSession[]>(WEEKLY_SCHEDULE_DATA);
+  const urlClassId = searchParams.get("classId") ?? "";
+  const urlDate = searchParams.get("date") ?? "";
+  const urlSessionId = searchParams.get("sessionId") ?? "";
 
-  const [selectedSessionId, setSelectedSessionId] = React.useState<string>(
-    () => sessions[0]?.id ?? "ses-mon-1",
+  const [activeTab, setActiveTab] = React.useState<"quick" | "matrix">("quick");
+  const [classes, setClasses] = React.useState<ClassroomGroup[]>([]);
+  const [weeklySessions, setWeeklySessions] = React.useState<WeeklyClassSession[]>([]);
+  const [pendingQueue, setPendingQueue] = React.useState<PendingAttendanceItem[]>([]);
+  const [students, setStudents] = React.useState<AdminStudentRecord[]>([]);
+  const [snapshot, setSnapshot] = React.useState<AttendanceSnapshotResult | null>(null);
+  const [loading, setLoading] = React.useState(true);
+
+  const todayIso = useTodayIso();
+  const [selectedClassId, setSelectedClassId] = React.useState<string>(urlClassId);
+  const [selectedSessionId, setSelectedSessionId] = React.useState<string>(urlSessionId);
+  const [selectedExceptionId, setSelectedExceptionId] = React.useState<string>("");
+  const [sessionDateOverride, setSessionDate] = React.useState<string | null>(() =>
+    urlDate && /^\d{4}-\d{2}-\d{2}$/.test(urlDate) ? urlDate : null,
   );
-  const [sessionDate, setSessionDate] = React.useState(() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  });
+  const sessionDate = sessionDateOverride ?? todayIso;
 
-  const [activeStudents, setActiveStudents] = React.useState<AdminStudentRecord[]>(() =>
-    ADMIN_STUDENTS_DATA.filter((s) => s.status !== "archived"),
-  );
-
-  const [roster, setRoster] = React.useState<StudentAttendanceEntry[]>(() =>
-    ADMIN_STUDENTS_DATA.filter((s) => s.status !== "archived").map((stu, idx) => ({
-      studentId: stu.id,
-      code: stu.code,
-      fullName: stu.fullName,
-      status: idx === 5 ? "absent" : idx === 3 ? "excused" : "present",
-      note:
-        idx === 3
-          ? "Xin phép nghỉ thi HSG cấp trường"
-          : idx === 5
-            ? "Chưa báo lý do"
-            : "",
-    })),
-  );
+  const [roster, setRoster] = React.useState<StudentAttendanceRowItem[]>([]);
+  const [savedEntries, setSavedEntries] = React.useState<
+    Record<string, { status: AttendanceStatusValue; note: string }>
+  >({});
+  const [saving, setSaving] = React.useState(false);
+  const [parentNoticeOpen, setParentNoticeOpen] = React.useState(false);
+  const [reloadNonce, setReloadNonce] = React.useState(0);
 
   React.useEffect(() => {
-    apiRequest<ClassroomGroup[]>("/api/admin/classes")
-      .then((items) => {
-        if (items && items.length > 0) {
-          const merged = mergeClassesWithDefaults(items);
-          setClasses(merged);
-          if (typeof window !== "undefined") {
-            try {
-              localStorage.setItem("teacher_studio_classrooms_v1", JSON.stringify(merged));
-            } catch {}
-          }
+    let active = true;
+    const params = new URLSearchParams();
+    if (selectedClassId) params.set("classId", selectedClassId);
+    if (selectedSessionId) params.set("sessionId", selectedSessionId);
+    if (sessionDate) params.set("date", sessionDate);
+    params.set("daysBack", "7");
+
+    apiRequest<AttendanceGetResponse>(`/api/admin/attendance?${params.toString()}`)
+      .then((payload) => {
+        if (!active) return;
+
+        const activeClasses = (payload.classes ?? []).filter(
+          (c) => c.status !== "archived" && c.status !== "completed",
+        );
+        setClasses(activeClasses);
+        setWeeklySessions(payload.sessions ?? []);
+        setPendingQueue(payload.pendingQueue ?? []);
+
+        const resolvedClassId =
+          selectedClassId && activeClasses.some((c) => c.id === selectedClassId)
+            ? selectedClassId
+            : activeClasses[0]?.id ?? "";
+
+        if (resolvedClassId && resolvedClassId !== selectedClassId) {
+          setSelectedClassId(resolvedClassId);
+          return;
         }
+
+        const classStudents = (payload.students ?? []).filter(
+          (stu) =>
+            stu.status !== "archived" &&
+            stu.status !== "on-leave" &&
+            (!resolvedClassId || stu.classId === resolvedClassId),
+        );
+        setStudents(classStudents);
+        setSnapshot(payload.snapshot ?? null);
+
+        const snapEntries = payload.snapshot?.entries ?? {};
+        setSavedEntries(snapEntries);
+        setRoster(
+          classStudents.map((stu) => {
+            const hit = snapEntries[stu.id];
+            return {
+              studentId: stu.id,
+              code: stu.code,
+              fullName: stu.fullName,
+              status: hit?.status ?? "present",
+              note: hit?.note ?? "",
+            };
+          }),
+        );
+        setLoading(false);
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (!active) return;
+        setLoading(false);
+        toast({
+          variant: "error",
+          title: "Không thể tải dữ liệu điểm danh",
+          description: err instanceof Error ? err.message : undefined,
+        });
+      });
 
-    apiRequest<WeeklyClassSession[]>("/api/admin/schedule")
-      .then((items) => {
-        if (items && items.length > 0) {
-          setSessions(items);
-          if (typeof window !== "undefined") {
-            try {
-              localStorage.setItem("teacher_studio_schedule_v1", JSON.stringify(items));
-            } catch {}
-          }
-        }
-      })
-      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [selectedClassId, selectedSessionId, sessionDate, reloadNonce, toast]);
 
-    apiRequest<AdminStudentRecord[]>("/api/admin/students?status=active&pageSize=100")
-      .then((items) => {
-        if (items.length > 0) {
-          setActiveStudents(items);
-          setRoster((prev) => {
-            const prevMap = new Map(prev.map((r) => [r.studentId, r]));
-            return items.map((stu) => {
-              const existing = prevMap.get(stu.id);
-              if (existing) {
-                return {
-                  ...existing,
-                  code: stu.code,
-                  fullName: stu.fullName,
-                };
-              }
-              return {
-                studentId: stu.id,
-                code: stu.code,
-                fullName: stu.fullName,
-                status: "present",
-                note: "",
-              };
-            });
-          });
-        }
-      })
-      .catch(() => {});
-  }, []);
-
-  const visibleRoster = React.useMemo(() => {
-    if (selectedClassId === "all") return roster;
-    const allowedIds = new Set(
-      activeStudents
-        .filter((s) => s.classId === selectedClassId)
-        .map((s) => s.id),
-    );
-    return roster.filter((r) => allowedIds.has(r.studentId));
-  }, [roster, selectedClassId, activeStudents]);
-
-  const totalPages = Math.max(1, Math.ceil(visibleRoster.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const paginatedRoster = visibleRoster.slice(
-    (currentPage - 1) * pageSize,
-    currentPage * pageSize,
+  const selectedClassroom = React.useMemo(
+    () => classes.find((c) => c.id === selectedClassId) ?? null,
+    [classes, selectedClassId],
   );
 
-  const stats = React.useMemo(() => {
-    const total = visibleRoster.length || 1;
-    const present = visibleRoster.filter((r) => r.status === "present").length;
-    const late = visibleRoster.filter((r) => r.status === "late").length;
-    const absent = visibleRoster.filter((r) => r.status === "absent").length;
-    const excused = visibleRoster.filter((r) => r.status === "excused").length;
-    const rate = Math.round(((present + late) / total) * 100);
-    return { total: visibleRoster.length, present, late, absent, excused, rate };
-  }, [visibleRoster]);
+  const sessionOptions = React.useMemo(() => {
+    const options: Array<{
+      value: string;
+      label: string;
+      exceptionId?: string;
+    }> = [];
 
-  const handleSetStatus = (studentId: string, status: AttendanceStatus) => {
+    const dayOccs = snapshot?.dayOccurrences ?? [];
+    for (const occ of dayOccs) {
+      const sesVal = occ.sessionId ?? occ.occurrenceKey;
+      const prefix =
+        occ.status === "canceled"
+          ? "[Tạm nghỉ] "
+          : occ.source === "makeup"
+            ? "[Dạy bù] "
+            : occ.source === "rescheduled"
+              ? "[Đổi lịch] "
+              : "";
+      options.push({
+        value: sesVal,
+        label: `${prefix}${occ.dayLabel} (${occ.startTime}–${occ.endTime}) · ${occ.topic}`,
+        exceptionId: occ.scheduleExceptionId,
+      });
+    }
+
+    if (selectedClassroom) {
+      for (const ws of weeklySessions) {
+        if (ws.classCode.toUpperCase() !== selectedClassroom.code.toUpperCase()) {
+          continue;
+        }
+        if (options.some((o) => o.value === ws.id)) continue;
+        options.push({
+          value: ws.id,
+          label: `Lịch cố định: ${ws.dayLabel} (${ws.startTime}–${ws.endTime}) · ${ws.topic}`,
+        });
+      }
+    }
+
+    if (options.length === 0 && selectedClassId) {
+      options.push({
+        value: `manual-${selectedClassId}`,
+        label: "Buổi học bổ sung / Ngoài lịch cố định",
+      });
+    }
+
+    return options;
+  }, [snapshot, selectedClassroom, weeklySessions, selectedClassId]);
+
+  const effectiveSessionId = React.useMemo(() => {
+    if (sessionOptions.some((o) => o.value === selectedSessionId)) {
+      return selectedSessionId;
+    }
+    return sessionOptions[0]?.value ?? "";
+  }, [sessionOptions, selectedSessionId]);
+
+  const effectiveExceptionId = React.useMemo(() => {
+    const matchedOption = sessionOptions.find(
+      (o) => o.value === effectiveSessionId,
+    );
+    return selectedExceptionId || matchedOption?.exceptionId || "";
+  }, [sessionOptions, effectiveSessionId, selectedExceptionId]);
+
+  const studentStatusMap = React.useMemo(
+    () => new Map(students.map((s) => [s.id, s.status])),
+    [students],
+  );
+
+  const stats = React.useMemo(() => computeAttendanceStats(roster), [roster]);
+
+  const isDirty = React.useMemo(() => {
+    if (!snapshot?.alreadyRecorded) {
+      return roster.some((r) => r.status !== "present" || r.note.trim() !== "");
+    }
+    return roster.some((r) => {
+      const prev = savedEntries[r.studentId];
+      if (!prev) return r.status !== "present" || r.note.trim() !== "";
+      return prev.status !== r.status || (prev.note ?? "") !== r.note;
+    });
+  }, [snapshot, roster, savedEntries]);
+
+  const isCanceledDate = Boolean(snapshot?.isCanceledDate);
+
+  const handleSetStatus = (studentId: string, status: AttendanceStatusValue) => {
     setRoster((prev) =>
       prev.map((item) =>
         item.studentId === studentId ? { ...item, status } : item,
@@ -214,49 +245,68 @@ export default function AdminAttendancePage() {
   };
 
   const handleMarkAllPresent = () => {
-    const visibleIds = new Set(visibleRoster.map((r) => r.studentId));
     setRoster((prev) =>
-      prev.map((item) =>
-        visibleIds.has(item.studentId)
-          ? { ...item, status: "present", note: "" }
-          : item,
-      ),
+      prev.map((item) => ({ ...item, status: "present", note: "" })),
     );
     toast({
-      title: "Đã đánh dấu tất cả Có mặt",
-      description: `Toàn bộ ${visibleRoster.length} học sinh trong danh sách đã được đánh dấu Có mặt.`,
       variant: "info",
+      title: "Đã đánh dấu tất cả Có mặt",
+      description: `Toàn bộ ${roster.length} học viên lớp ${selectedClassroom?.code ?? ""} đã được chọn Có mặt.`,
     });
   };
 
+  const handleSelectPendingItem = (item: PendingAttendanceItem) => {
+    setLoading(true);
+    setSelectedClassId(item.classId);
+    setSessionDate(item.date);
+    setSelectedSessionId(item.sessionId);
+    setSelectedExceptionId(item.scheduleExceptionId ?? "");
+    setActiveTab("quick");
+  };
+
   const handleSaveAttendance = async () => {
+    if (!selectedClassId || roster.length === 0) return;
+
+    setSaving(true);
     try {
       const res = await apiRequest<{
         attendanceRate: number;
         recordedCount: number;
+        classSessionId?: string;
       }>("/api/admin/attendance", {
         method: "POST",
         body: JSON.stringify({
-          sessionId: selectedSessionId,
+          classId: selectedClassId,
+          sessionId: effectiveSessionId || `manual-${selectedClassId}`,
+          scheduleExceptionId: effectiveExceptionId || undefined,
           date: sessionDate,
-          entries: visibleRoster.map((r) => ({
+          entries: roster.map((r) => ({
             studentId: r.studentId,
             status: r.status,
             note: r.note,
           })),
         }),
       });
+
       toast({
-        title: "Đã lưu sổ điểm danh thành công",
-        description: `Tỷ lệ chuyên cần ca học đạt ${res.attendanceRate}% (${res.recordedCount} học sinh được đồng bộ).`,
         variant: "success",
+        title: "Đã lưu sổ điểm danh thành công",
+        description: res.classSessionId
+          ? `Tỷ lệ chuyên cần ${res.attendanceRate}% (${res.recordedCount} HV) · Đã đồng bộ sang Nhật ký Giảng dạy.`
+          : `Tỷ lệ chuyên cần ca học đạt ${res.attendanceRate}% (${res.recordedCount} HV).`,
       });
-    } catch {
+      setReloadNonce((n) => n + 1);
+    } catch (err) {
       toast({
-        title: "Đã lưu sổ điểm danh thành công",
-        description: `Tỷ lệ chuyên cần ca học đạt ${stats.rate}% (${stats.present} có mặt, ${stats.excused} có phép).`,
-        variant: "success",
+        variant: "error",
+        title: "Không thể lưu điểm danh",
+        description:
+          err instanceof Error
+            ? err.message
+            : "Vui lòng kiểm tra dữ liệu hoặc ngày nghỉ trên Thời khóa biểu.",
       });
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -269,249 +319,220 @@ export default function AdminAttendancePage() {
             Điểm danh Ca học nhanh
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Thiết kế tối ưu tốc độ: Chọn lớp → Chọn ca học → Đánh dấu trạng thái 1 chạm và lưu sổ.
+            Chọn lớp cụ thể → Chọn ca học thực tế (kể cả dạy bù/đổi lịch) → Điểm danh 1 chạm và đồng bộ hai chiều với Nhật ký Giảng dạy.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          <Button variant="outline" onClick={handleMarkAllPresent}>
-            <CheckCheck className="size-4 text-primary" aria-hidden="true" />
-            Đánh dấu tất cả Có mặt
-          </Button>
-          <Button onClick={handleSaveAttendance}>
-            <Save className="size-4" aria-hidden="true" />
-            Lưu điểm danh
-          </Button>
+        <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+          <div className="inline-flex shrink-0 rounded-xl border border-border bg-muted/40 p-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab("quick")}
+              className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-medium whitespace-nowrap transition-colors ${
+                activeTab === "quick"
+                  ? "bg-card text-foreground shadow-2xs"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <UserCheck className="size-3.5" aria-hidden="true" />
+              Điểm danh nhanh
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("matrix")}
+              className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-medium whitespace-nowrap transition-colors ${
+                activeTab === "matrix"
+                  ? "bg-card text-foreground shadow-2xs"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Grid3X3 className="size-3.5" aria-hidden="true" />
+              Sổ điểm danh (Ma trận)
+            </button>
+          </div>
+
+          {activeTab === "quick" && (
+            <Button
+              type="button"
+              disabled={saving || isCanceledDate || roster.length === 0}
+              onClick={() => void handleSaveAttendance()}
+              className="h-9 shrink-0 px-3.5 whitespace-nowrap"
+            >
+              <Save className="size-4" aria-hidden="true" />
+              {saving ? "Đang lưu..." : "Lưu điểm danh"}
+            </Button>
+          )}
         </div>
       </div>
 
-      {/* Session & Class Selector Bar */}
-      <div className="grid gap-4 rounded-2xl border border-border bg-card p-5 sm:grid-cols-3">
-        <div className="space-y-1.5">
-          <label
-            htmlFor="att-class-select"
-            className="block text-xs font-semibold text-foreground"
-          >
-            1. Chọn lớp học
-          </label>
-          <select
-            id="att-class-select"
-            value={selectedClassId}
-            onChange={(e) => {
-              setSelectedClassId(e.target.value);
-              setPage(1);
-            }}
-            className="h-9 w-full rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
-          >
-            <option value="all">Tất cả học viên ({roster.length} HV)</option>
-            {classes.map((cls) => (
-              <option key={cls.id} value={cls.id}>
-                {cls.code} — {cls.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="space-y-1.5">
-          <label
-            htmlFor="att-session-select"
-            className="block text-xs font-semibold text-foreground"
-          >
-            2. Chọn ca học trong tuần
-          </label>
-          <select
-            id="att-session-select"
-            value={selectedSessionId}
-            onChange={(e) => {
-              setSelectedSessionId(e.target.value);
-              setPage(1);
-            }}
-            className="h-9 w-full rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
-          >
-            {sessions.map((ses) => (
-              <option key={ses.id} value={ses.id}>
-                {ses.dayLabel} ({ses.startTime}–{ses.endTime}) · {ses.classCode}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="space-y-1.5">
-          <label
-            htmlFor="att-date-input"
-            className="block text-xs font-semibold text-foreground"
-          >
-            3. Ngày điểm danh
-          </label>
-          <Input
-            id="att-date-input"
-            type="date"
-            value={sessionDate}
-            onChange={(e) => {
-              setSessionDate(e.target.value);
-              setPage(1);
-            }}
-            className="h-9"
+      {activeTab === "quick" ? (
+        <>
+          <AttendancePendingQueue
+            items={pendingQueue}
+            activeClassId={selectedClassId}
+            activeDate={sessionDate}
+            onSelect={handleSelectPendingItem}
           />
-        </div>
-      </div>
 
-      {/* Live Attendance Summary Strip */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-        <div className="rounded-2xl border border-border bg-card p-4">
-          <span className="text-xs text-muted-foreground">Tỷ lệ chuyên cần</span>
-          <p className="mt-1 font-mono text-2xl font-bold text-primary">
-            {stats.rate}%
-          </p>
-        </div>
-        <div className="rounded-2xl border border-emerald-500/25 bg-emerald-500/5 p-4">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-800">
-            <UserCheck className="size-3.5" aria-hidden="true" />
-            Có mặt đúng giờ
-          </span>
-          <p className="mt-1 font-mono text-2xl font-bold text-emerald-700">
-            {stats.present}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-amber-500/25 bg-amber-500/5 p-4">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-800">
-            <Clock className="size-3.5" aria-hidden="true" />
-            Đi muộn
-          </span>
-          <p className="mt-1 font-mono text-2xl font-bold text-amber-700">
-            {stats.late}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-destructive/25 bg-destructive/5 p-4">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-destructive">
-            <UserX className="size-3.5" aria-hidden="true" />
-            Vắng mặt
-          </span>
-          <p className="mt-1 font-mono text-2xl font-bold text-destructive">
-            {stats.absent}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-border bg-warm/50 p-4">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-primary">
-            <UserMinus className="size-3.5" aria-hidden="true" />
-            Nghỉ có phép
-          </span>
-          <p className="mt-1 font-mono text-2xl font-bold text-primary">
-            {stats.excused}
-          </p>
-        </div>
-      </div>
-
-      {/* Fast 1-Click Student Roster */}
-      <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-2xs">
-        <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
-          <h2 className="font-heading text-sm font-bold text-foreground">
-            Danh sách học sinh ({visibleRoster.length} học viên)
-          </h2>
-          <Badge variant="outline">
-            Tự động đồng bộ sang Cổng tra cứu cá nhân sau khi lưu
-          </Badge>
-        </div>
-
-        <div className="divide-y divide-border">
-          {paginatedRoster.map((entry, idx) => {
-            const actualIndex = (currentPage - 1) * pageSize + idx + 1;
-            return (
-              <div
-                key={entry.studentId}
-                className="flex flex-col justify-between gap-4 p-4 transition-colors hover:bg-muted/20 lg:flex-row lg:items-center"
+          {/* Session & Class Selector Bar */}
+          <div className="grid gap-4 rounded-2xl border border-border bg-card p-5 sm:grid-cols-3">
+            <div className="space-y-1.5">
+              <label
+                htmlFor="att-class-select"
+                className="block text-xs font-semibold text-foreground"
               >
-                {/* Student Identity */}
-                <div className="flex items-center gap-3.5 min-w-64">
-                  <span className="w-6 font-mono text-xs text-muted-foreground">
-                    {String(actualIndex).padStart(2, "0")}
-                  </span>
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-warm font-heading text-xs font-bold text-primary">
-                    {entry.fullName
-                      .split(" ")
-                      .slice(-2)
-                      .map((w) => w[0])
-                      .join("")}
-                  </div>
-                  <div>
-                    <p className="font-heading text-sm font-bold text-foreground">
-                      {entry.fullName}
-                    </p>
-                    <p className="font-mono text-xs text-muted-foreground">
-                      {entry.code}
-                    </p>
-                  </div>
-                </div>
+                1. Chọn lớp học (Bắt buộc)
+              </label>
+              <select
+                id="att-class-select"
+                value={selectedClassId}
+                onChange={(e) => {
+                  setLoading(true);
+                  setSelectedClassId(e.target.value);
+                  setSelectedSessionId("");
+                  setSelectedExceptionId("");
+                }}
+                className="h-9 w-full rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
+              >
+                {classes.length === 0 && (
+                  <option value="">Không có lớp đang hoạt động</option>
+                )}
+                {classes.map((cls) => (
+                  <option key={cls.id} value={cls.id}>
+                    {cls.code} — {cls.name} ({cls.enrolled} HV)
+                  </option>
+                ))}
+              </select>
+            </div>
 
-                {/* 1-Click Segmented Status Buttons */}
-                <div
-                  className="flex flex-wrap items-center gap-1.5"
-                  role="radiogroup"
-                  aria-label={`Trạng thái điểm danh của ${entry.fullName}`}
-                >
-                  {STATUS_OPTIONS.map((opt) => {
-                    const active = entry.status === opt.value;
-                    return (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        role="radio"
-                        aria-checked={active}
-                        onClick={() => handleSetStatus(entry.studentId, opt.value)}
-                        className={cn(
-                          "rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all",
-                          active
-                            ? opt.activeClass
-                            : "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
-                        )}
-                      >
-                        {opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
+            <div className="space-y-1.5">
+              <label
+                htmlFor="att-session-select"
+                className="block text-xs font-semibold text-foreground"
+              >
+                2. Chọn ca học ({formatAttendanceDateVi(sessionDate)})
+              </label>
+              <select
+                id="att-session-select"
+                value={effectiveSessionId}
+                onChange={(e) => {
+                  const chosen = sessionOptions.find(
+                    (o) => o.value === e.target.value,
+                  );
+                  setSelectedSessionId(e.target.value);
+                  setSelectedExceptionId(chosen?.exceptionId ?? "");
+                }}
+                className="h-9 w-full rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
+              >
+                {sessionOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-                {/* Inline Note */}
-                <div className="w-full lg:w-72">
-                  <Input
-                    type="text"
-                    value={entry.note}
-                    onChange={(e) => handleSetNote(entry.studentId, e.target.value)}
-                    placeholder="Ghi chú lý do vắng / muộn / bài bù..."
-                    aria-label={`Ghi chú điểm danh cho ${entry.fullName}`}
-                    className="h-8 text-xs"
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
+            <div className="space-y-1.5">
+              <label
+                htmlFor="att-date-input"
+                className="block text-xs font-semibold text-foreground"
+              >
+                3. Ngày điểm danh
+              </label>
+              <Input
+                id="att-date-input"
+                type="date"
+                value={sessionDate}
+                onChange={(e) => {
+                  setLoading(true);
+                  setSessionDate(e.target.value);
+                  setSelectedExceptionId("");
+                }}
+                className="h-9"
+              />
+            </div>
+          </div>
 
-        {visibleRoster.length > 0 && (
-          <PaginationBar
-            page={currentPage}
-            totalPages={totalPages}
-            totalItems={visibleRoster.length}
-            pageSize={pageSize}
-            onPageChange={setPage}
-            onPageSizeChange={(sz) => {
-              setPageSize(sz);
-              setPage(1);
-            }}
-            pageSizeOptions={[10, 20, 50]}
+          <AttendanceKpiStrip
+            stats={stats}
+            alreadyRecorded={Boolean(snapshot?.alreadyRecorded)}
+            isDirty={isDirty}
+            isCanceledDate={isCanceledDate}
           />
-        )}
 
-        <div className="flex items-center justify-between border-t border-border bg-muted/20 px-5 py-3.5">
-          <span className="text-xs text-muted-foreground">
-            Đã kiểm tra {visibleRoster.length}/{visibleRoster.length} học sinh
-          </span>
-          <Button size="sm" onClick={handleSaveAttendance}>
-            <CheckCircle2 className="size-4" aria-hidden="true" />
-            Hoàn tất & Lưu điểm danh
-          </Button>
-        </div>
-      </div>
+          {loading ? (
+            <div className="space-y-3">
+              <Skeleton className="h-16 w-full rounded-2xl" />
+              <Skeleton className="h-64 w-full rounded-2xl" />
+            </div>
+          ) : (
+            <AttendanceRosterPanel
+              classroom={selectedClassroom}
+              sessionDate={sessionDate}
+              roster={roster}
+              onLeaveStudents={snapshot?.onLeaveStudents ?? []}
+              consecutiveAbsencesByStudentId={
+                snapshot?.consecutiveAbsencesByStudentId ?? {}
+              }
+              studentStatusMap={studentStatusMap}
+              isCanceledDate={isCanceledDate}
+              canceledReason={snapshot?.canceledReason}
+              alreadyRecorded={Boolean(snapshot?.alreadyRecorded)}
+              isDirty={isDirty}
+              saving={saving}
+              classSessionId={snapshot?.classSessionId}
+              onSetStatus={handleSetStatus}
+              onSetNote={handleSetNote}
+              onMarkAllPresent={handleMarkAllPresent}
+              onOpenParentNotice={() => setParentNoticeOpen(true)}
+              onSave={() => void handleSaveAttendance()}
+            />
+          )}
+
+          <AttendanceParentNoticeModal
+            open={parentNoticeOpen}
+            classCode={selectedClassroom?.code ?? "LỚP"}
+            className={selectedClassroom?.name ?? "Lớp học"}
+            date={sessionDate}
+            sessionLabel={
+              sessionOptions.find((o) => o.value === effectiveSessionId)?.label
+            }
+            entries={roster.map((r) => ({
+              studentCode: r.code,
+              fullName: r.fullName,
+              status: r.status,
+              note: r.note,
+            }))}
+            onClose={() => setParentNoticeOpen(false)}
+          />
+        </>
+      ) : (
+        <AttendanceMatrixTab
+          classrooms={classes}
+          selectedClassId={selectedClassId}
+          onChangeClassId={(nextId) => {
+            setSelectedClassId(nextId);
+            setSelectedSessionId("");
+            setSelectedExceptionId("");
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+export default function AdminAttendancePage() {
+  return (
+    <React.Suspense
+      fallback={
+        <div className="space-y-4">
+          <Skeleton className="h-12 w-72" />
+          <Skeleton className="h-28 w-full rounded-2xl" />
+          <Skeleton className="h-72 w-full rounded-2xl" />
+        </div>
+      }
+    >
+      <AttendanceWorkspace />
+    </React.Suspense>
   );
 }

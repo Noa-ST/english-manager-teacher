@@ -26,14 +26,16 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "cn";
+import { apiRequest } from "@/lib/api-client";
+import { ADMIN_NAV } from "@/lib/routes";
+import type { AdminStudentRecord, ClassroomGroup } from "@/services/domain-types";
+import { SETTINGS_UPDATED_EVENT } from "@/services/settings-helpers";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ModalDialog } from "@/components/ui/dialog";
 import { Breadcrumb } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
-import { ModalDialog } from "@/components/ui/dialog";
 import { ToastProvider, useToast } from "@/components/ui/toast";
-import { ADMIN_NAV } from "@/lib/routes";
-import { ADMIN_STUDENTS_DATA, CLASSROOMS_DATA, TEACHER_PROFILE } from "@/services/classroom-data";
 
 const NAV_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   "/dashboard": LayoutDashboard,
@@ -49,29 +51,19 @@ const NAV_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   "/settings": Settings,
 };
 
-const INITIAL_NOTIFICATIONS = [
-  {
-    id: "notif-1",
-    title: "Ca học IELTS Foundation bắt đầu sau 30 phút",
-    detail: "Phòng 302 · 14/15 học sinh đã xác nhận tham gia",
-    time: "15 phút trước",
-    unread: true,
-  },
-  {
-    id: "notif-2",
-    title: "3 bài Writing Task 2 mới nộp chờ chấm",
-    detail: "Trần Bảo Ngọc, Lê Hoàng Minh Khôi, Nguyễn Đức Anh",
-    time: "2 giờ trước",
-    unread: true,
-  },
-  {
-    id: "notif-3",
-    title: "1 học sinh sắp đến hạn học phí Học kỳ II",
-    detail: "Phạm Hà Phương (HS-2026-03) · Hạn 20/11/2026",
-    time: "Hôm nay",
-    unread: false,
-  },
-];
+interface ShellNotification {
+  id: string;
+  title: string;
+  detail: string;
+  time: string;
+  unread: boolean;
+}
+
+interface ShellBrandMeta {
+  name: string;
+  avatarUrl: string;
+  currentTerm: string;
+}
 
 function AdminShellInner({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -83,7 +75,98 @@ function AdminShellInner({ children }: { children: React.ReactNode }) {
   const [searchOpen, setSearchOpen] = React.useState(false);
   const [searchQuery, setSearchQuery] = React.useState("");
   const [notifOpen, setNotifOpen] = React.useState(false);
-  const [notifications, setNotifications] = React.useState(INITIAL_NOTIFICATIONS);
+  const [students, setStudents] = React.useState<AdminStudentRecord[]>([]);
+  const [classes, setClasses] = React.useState<ClassroomGroup[]>([]);
+  const [notifications, setNotifications] = React.useState<ShellNotification[]>([]);
+  const [brandMeta, setBrandMeta] = React.useState<ShellBrandMeta>({
+    name: "",
+    avatarUrl: "/images/teacher-avatar.jpg",
+    currentTerm: "",
+  });
+
+  // Sync live brand, term, global search index & notifications from PostgreSQL APIs
+  React.useEffect(() => {
+    let active = true;
+
+    apiRequest<Partial<ShellBrandMeta>>("/api/admin/settings")
+      .then((res) => {
+        if (!active || !res) return;
+        setBrandMeta((prev) => ({
+          name: res.name?.trim() ? res.name : prev.name,
+          avatarUrl: res.avatarUrl?.trim() ? res.avatarUrl : prev.avatarUrl,
+          currentTerm: res.currentTerm?.trim() ? res.currentTerm : prev.currentTerm,
+        }));
+      })
+      .catch(() => {});
+
+    Promise.allSettled([
+      apiRequest<AdminStudentRecord[]>(
+        "/api/admin/students?status=non-archived&page=1&pageSize=200",
+      ),
+      apiRequest<ClassroomGroup[]>("/api/admin/classes"),
+    ]).then(([stuRes, clsRes]) => {
+      if (!active) return;
+      const fetchedStudents =
+        stuRes.status === "fulfilled" && Array.isArray(stuRes.value)
+          ? stuRes.value
+          : [];
+      const fetchedClasses =
+        clsRes.status === "fulfilled" && Array.isArray(clsRes.value)
+          ? clsRes.value
+          : [];
+
+      setStudents(fetchedStudents);
+      setClasses(fetchedClasses);
+
+      const liveNotifs: ShellNotification[] = [];
+      const activeCls = fetchedClasses.find((c) => c.status === "active");
+      if (activeCls) {
+        liveNotifs.push({
+          id: `notif-cls-${activeCls.id}`,
+          title: `Lớp ${activeCls.name} đang vận hành`,
+          detail: `${activeCls.room} · ${activeCls.enrolled}/${activeCls.capacity} học sinh · ${activeCls.scheduleSummary}`,
+          time: "Đang diễn ra",
+          unread: true,
+        });
+      }
+
+      const tuitionDueStudents = fetchedStudents.filter(
+        (s) =>
+          (s.tuitionStatus === "overdue" || s.tuitionStatus === "due-soon") &&
+          s.status !== "trial",
+      );
+      if (tuitionDueStudents.length > 0) {
+        const firstStu = tuitionDueStudents[0];
+        liveNotifs.push({
+          id: "notif-tuition-due",
+          title: `${tuitionDueStudents.length} học sinh cần nhắc hạn học phí`,
+          detail: `${firstStu.fullName} (${firstStu.code}) · Hạn ${firstStu.tuitionDueDate}`,
+          time: "Hôm nay",
+          unread: true,
+        });
+      }
+
+      setNotifications(liveNotifs);
+    });
+
+    const handleSettingsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<Partial<ShellBrandMeta>>).detail;
+      if (!detail) return;
+      setBrandMeta((prev) => ({
+        name: detail.name?.trim() ? detail.name : prev.name,
+        avatarUrl: detail.avatarUrl?.trim() ? detail.avatarUrl : prev.avatarUrl,
+        currentTerm: detail.currentTerm?.trim()
+          ? detail.currentTerm
+          : prev.currentTerm,
+      }));
+    };
+
+    window.addEventListener(SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+    return () => {
+      active = false;
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+    };
+  }, []);
 
   // Keyboard shortcut Ctrl+K / Cmd+K for Global Search
   React.useEffect(() => {
@@ -117,13 +200,36 @@ function AdminShellInner({ children }: { children: React.ReactNode }) {
     router.refresh();
   };
 
-  const filteredStudents = ADMIN_STUDENTS_DATA.filter(
+  const renderBrandAvatar = () => {
+    const src = brandMeta.avatarUrl || "/images/teacher-avatar.jpg";
+    if (src.startsWith("http://") || src.startsWith("https://")) {
+      return (
+        /* eslint-disable-next-line @next/next/no-img-element */
+        <img
+          src={src}
+          alt={brandMeta.name}
+          className="size-full object-cover object-top"
+        />
+      );
+    }
+    return (
+      <Image
+        src={src}
+        alt={brandMeta.name}
+        fill
+        className="object-cover object-top"
+        sizes="32px"
+      />
+    );
+  };
+
+  const filteredStudents = students.filter(
     (s) =>
       s.fullName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       s.code.toLowerCase().includes(searchQuery.toLowerCase()),
   );
 
-  const filteredClasses = CLASSROOMS_DATA.filter(
+  const filteredClasses = classes.filter(
     (c) =>
       c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       c.code.toLowerCase().includes(searchQuery.toLowerCase()),
@@ -153,20 +259,14 @@ function AdminShellInner({ children }: { children: React.ReactNode }) {
         <div className="flex h-15 items-center justify-between border-b border-sidebar-border px-4">
           <Link href="/dashboard" className="flex items-center gap-3 overflow-hidden">
             <div className="relative size-8 shrink-0 overflow-hidden rounded-lg border border-border">
-              <Image
-                src={TEACHER_PROFILE.avatarUrl || "/images/teacher-avatar.jpg"}
-                alt={TEACHER_PROFILE.name}
-                fill
-                className="object-cover object-top"
-                sizes="32px"
-              />
+              {renderBrandAvatar()}
             </div>
             {!collapsed && (
               <div className="min-w-0">
                 <p className="truncate font-heading text-sm font-bold text-primary">
                   Teacher Studio
                 </p>
-                <p className="truncate text-[11px] text-muted-foreground">{TEACHER_PROFILE.name}</p>
+                <p className="truncate text-[11px] text-muted-foreground">{brandMeta.name}</p>
               </div>
             )}
           </Link>
@@ -228,15 +328,15 @@ function AdminShellInner({ children }: { children: React.ReactNode }) {
             <div className="rounded-lg border border-border bg-background/60 p-3">
               <div className="flex items-center justify-between gap-2">
                 <span className="truncate font-heading text-xs font-semibold text-foreground">
-                  {TEACHER_PROFILE.name}
+                  {brandMeta.name}
                 </span>
                 <span className="inline-flex items-center gap-1 font-mono text-[10px] font-medium text-emerald-700">
                   <span className="size-1.5 rounded-full bg-emerald-500" />
                   Online
                 </span>
               </div>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                Học kỳ I · 2026–2027
+              <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                {brandMeta.currentTerm}
               </p>
               <button
                 type="button"
@@ -273,13 +373,7 @@ function AdminShellInner({ children }: { children: React.ReactNode }) {
             <div className="flex h-15 items-center justify-between border-b border-border px-4">
               <div className="flex items-center gap-2.5">
                 <div className="relative size-8 overflow-hidden rounded-lg border border-border">
-                  <Image
-                    src={TEACHER_PROFILE.avatarUrl || "/images/teacher-avatar.jpg"}
-                    alt={TEACHER_PROFILE.name}
-                    fill
-                    className="object-cover object-top"
-                    sizes="32px"
-                  />
+                  {renderBrandAvatar()}
                 </div>
                 <span className="font-heading text-sm font-bold text-primary">
                   Teacher Studio
@@ -527,4 +621,3 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
     </ToastProvider>
   );
 }
-

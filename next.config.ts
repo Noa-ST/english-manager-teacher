@@ -23,13 +23,37 @@ function storageRemotePatterns(): NonNullable<NextConfig["images"]>["remotePatte
   }
 }
 
+function originFromEnvUrl(raw?: string): string | null {
+  if (!raw?.trim()) return null;
+  try {
+    return new URL(raw.trim()).origin;
+  } catch {
+    return null;
+  }
+}
+
+const allowedMediaOrigins = Array.from(
+  new Set(
+    [
+      "https://res.cloudinary.com",
+      "https://api.cloudinary.com",
+      originFromEnvUrl(process.env.SUPABASE_URL),
+      originFromEnvUrl(process.env.STORAGE_PUBLIC_URL),
+    ].filter((origin): origin is string => Boolean(origin)),
+  ),
+);
+
+const mediaAndConnectOrigins = allowedMediaOrigins.join(" ");
+
 const contentSecurityPolicy = `
   default-src 'self';
-  script-src 'self' 'unsafe-eval' 'unsafe-inline';
+  script-src 'self';
   style-src 'self' 'unsafe-inline';
-  img-src 'self' data: blob: https:;
+  img-src 'self' data: blob: ${mediaAndConnectOrigins};
+  media-src 'self' blob: ${mediaAndConnectOrigins};
   font-src 'self' data:;
-  connect-src 'self' https:;
+  connect-src 'self' ${mediaAndConnectOrigins};
+  frame-src 'self' https://www.youtube.com https://www.youtube-nocookie.com https://player.vimeo.com;
   object-src 'none';
   base-uri 'self';
   form-action 'self';
@@ -39,7 +63,7 @@ const contentSecurityPolicy = `
   .trim();
 
 const securityHeaders = [
-  { key: "Content-Security-Policy", value: contentSecurityPolicy },
+  { key: "Content-Security-Policy-Report-Only", value: contentSecurityPolicy },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "X-Frame-Options", value: "DENY" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },

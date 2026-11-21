@@ -3,7 +3,12 @@ import { ValidationError } from "@/services/errors";
 import * as scheduleService from "@/services/schedule.service";
 
 export const GET = adminRoute(async (request) => {
-  const sessions = await scheduleService.listWeeklySchedule(readQuery(request));
+  const query = readQuery(request);
+  const sessions = await scheduleService.listWeeklySchedule({
+    dayOfWeek: query.dayOfWeek,
+    classCode: query.classCode,
+    room: query.room,
+  });
   return ok(sessions);
 });
 

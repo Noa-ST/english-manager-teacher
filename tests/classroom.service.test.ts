@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { describe, it, beforeEach } from "node:test";
+import { after, beforeEach, describe, it } from "node:test";
 
+import { prisma } from "@/lib/db/prisma";
+import { resetServerEnvCache } from "@/lib/env";
 import {
   listClassrooms,
   listAllClassrooms,
@@ -15,15 +17,151 @@ import {
   removeClassroomMaterial,
   assignMaterialToClasses,
   removeMaterialFromAllClasses,
+  completeClassroom,
+  activateClassroom,
+  cloneClassroom,
+  shiftClassroomCurriculumDates,
+  listCurriculumTemplates,
+  saveClassroomAsTemplate,
+  deleteCurriculumTemplate,
 } from "@/services/classroom.service";
-import { resolveWeekStatus } from "@/services/classroom-data";
+import { resolveWeekStatus, type ClassroomGroup } from "@/services/classroom-data";
+import { sanitizeClassroomRoadmapForStudent } from "@/services/classroom-helpers";
 import { ConflictError, NotFoundError, ValidationError } from "@/services/errors";
-import { resetRuntimeStore, getRuntimeStore } from "@/services/runtime-store";
+import { recordAttendance, getAttendanceSnapshot } from "@/services/schedule.service";
+import {
+  listResourceFiles,
+  listStorageAuditLogs,
+  listStoredFiles,
+  uploadCurriculumAttachment,
+} from "@/services/storage.service";
+import * as studentService from "@/services/student.service";
+import * as teachingJournalService from "@/services/teaching-journal.service";
 
-describe("Classroom Service — Quản lý Lớp học & Khung chương trình", () => {
+import {
+  hasTestDatabase,
+  resetAndSeedTestDatabase,
+  teardownTestDatabase,
+} from "./test-db";
+
+function applyTestEnv() {
+  if (!process.env.DATABASE_URL) {
+    process.env.DATABASE_URL =
+      process.env.TEST_DATABASE_URL ||
+      "postgresql://postgres:123456@localhost:5432/english_manager?schema=public";
+  }
+  process.env.AUTH_SECRET =
+    process.env.AUTH_SECRET ||
+    "test-only-auth-secret-with-at-least-32-characters-long";
+  process.env.ADMIN_EMAIL = process.env.ADMIN_EMAIL || "teacher@example.com";
+  process.env.STORAGE_PROVIDER_DOCUMENTS = "supabase";
+  process.env.MAX_PDF_SIZE_MB = "40";
+  resetServerEnvCache();
+}
+
+describe("Classroom Service — Pure Helpers (Offline)", () => {
   beforeEach(() => {
-    resetRuntimeStore();
+    applyTestEnv();
   });
+
+  it("7.8. resolveWeekStatus tính toán chính xác trạng thái tuần kế thừa khi chưa set explicit", () => {
+    const weekPast = { weekNumber: 1, title: "Tuần cũ" };
+    const weekCurrent = { weekNumber: 3, title: "Tuần hiện tại" };
+    const weekFuture = { weekNumber: 5, title: "Tuần tương lai" };
+    const weekExplicit = {
+      weekNumber: 1,
+      title: "Tuần cũ nhưng hoãn",
+      status: "postponed" as const,
+    };
+
+    assert.strictEqual(resolveWeekStatus(weekPast, 3), "completed");
+    assert.strictEqual(resolveWeekStatus(weekCurrent, 3), "in-progress");
+    assert.strictEqual(resolveWeekStatus(weekFuture, 3), "not-started");
+    assert.strictEqual(resolveWeekStatus(weekExplicit, 3), "postponed");
+  });
+
+  it("9.9. Sanitize lộ trình học cho Cổng Học sinh ẩn ghi chú nội bộ & khóa tuần tương lai", () => {
+    const cls: ClassroomGroup = {
+      id: "cls-priv-fixture",
+      code: "PRIV-01",
+      name: "Lớp Bảo Mật Cổng HS",
+      level: "IELTS 6.5+",
+      targetBand: "7.0",
+      scheduleSummary: "Thứ 2 (18:00 - 19:30)",
+      room: "Phòng 301",
+      enrolled: 0,
+      capacity: 12,
+      attendanceRate: 100,
+      averageScore: 0,
+      currentModule: "Tuần 1/3 · Tuần Mở Khóa",
+      status: "active",
+      totalWeeks: 3,
+      currentWeekIndex: 1,
+      curriculum: [
+        {
+          weekNumber: 1,
+          title: "Tuần Mở Khóa",
+          notes: "Ghi chú nội bộ: Em A hơi chậm phần từ vựng",
+          homework: "Làm bài đọc Test 1",
+          status: "in-progress",
+          attachments: [
+            {
+              id: "att-pub-1",
+              name: "Test1.pdf",
+              type: "PDF",
+              size: "500 KB",
+              url: "/uploads/t1.pdf",
+              uploadedAt: "10/11/2026",
+            },
+          ],
+        },
+        {
+          weekNumber: 2,
+          title: "Tuần Tương Lai",
+          notes: "Đáp án nội bộ đề thi",
+          homework: "Đề bí mật chưa phát",
+          status: "not-started",
+          attachments: [
+            {
+              id: "att-sec-2",
+              name: "SecretKey.pdf",
+              type: "PDF",
+              size: "800 KB",
+              url: "/uploads/secret.pdf",
+              uploadedAt: "10/11/2026",
+            },
+          ],
+        },
+      ],
+    };
+
+    const roadmap = sanitizeClassroomRoadmapForStudent(cls);
+    const w1 = roadmap.weeks.find((w) => w.weekNumber === 1);
+    const w2 = roadmap.weeks.find((w) => w.weekNumber === 2);
+
+    assert.ok(w1 && !w1.isLocked);
+    assert.strictEqual("notes" in w1, false);
+    assert.strictEqual(w1.homework, "Làm bài đọc Test 1");
+    assert.strictEqual(w1.attachments.length, 1);
+
+    assert.ok(w2 && w2.isLocked);
+    assert.strictEqual(w2.homework, undefined);
+    assert.strictEqual(w2.attachments.length, 0);
+  });
+});
+
+describe(
+  "PostgreSQL / Prisma Classroom & Curriculum Service",
+  { skip: !hasTestDatabase() },
+  () => {
+    beforeEach(async () => {
+      applyTestEnv();
+      await resetAndSeedTestDatabase();
+    });
+
+    after(async () => {
+      await teardownTestDatabase();
+    });
 
   describe("1. Danh sách lớp & Tính toán Metrics động (List & Dynamic Metrics)", () => {
     it("1.1. Lấy danh sách lớp hoạt động (mặc định loại bỏ lớp archived)", async () => {
@@ -38,11 +176,11 @@ describe("Classroom Service — Quản lý Lớp học & Khung chương trình",
     it("1.2. Tính toán sĩ số enrolled động từ bảng học sinh", async () => {
       const classes = await listClassrooms();
       const first = classes[0];
-      const store = getRuntimeStore();
-      const realCount = store.students.filter(
-        (s) => s.classId === first.id && s.status !== "archived" && !s.deletedAt,
-      ).length;
-      assert.strictEqual(first.enrolled, realCount);
+      const activeStudents = await studentService.listAllStudents({
+        classId: first.id,
+        status: "non-archived",
+      });
+      assert.strictEqual(first.enrolled, activeStudents.length);
     });
 
     it("1.3. Lấy tất cả lớp bao gồm cả archived khi includeArchived=true", async () => {
@@ -166,7 +304,7 @@ describe("Classroom Service — Quản lý Lớp học & Khung chương trình",
       );
     });
 
-    it("4.5. Tự động đồng bộ mã lớp, tên lớp, trình độ sang học sinh & nhật ký buổi học khi cập nhật", async () => {
+    it("4.5. Tự động đồng bộ mã lớp, tên lớp, trình độ sang học sinh & lịch buổi học khi cập nhật", async () => {
       const updated = await updateClassroom("cls-ii-01", {
         code: "II-01-PRO",
         name: "IELTS Intensive Pro",
@@ -174,16 +312,25 @@ describe("Classroom Service — Quản lý Lớp học & Khung chương trình",
       });
       assert.strictEqual(updated.code, "II-01-PRO");
 
-      const store = getRuntimeStore();
-      const linkedStudents = store.students.filter((s) => s.classId === "cls-ii-01");
+      const linkedStudents = await studentService.listAllStudents({
+        classId: "cls-ii-01",
+        status: "all",
+      });
       assert.ok(linkedStudents.length > 0);
-      assert.ok(linkedStudents.every((s) => s.className === "IELTS Intensive Pro" && s.level === "C1+"));
+      assert.ok(
+        linkedStudents.every(
+          (s) => s.className === "IELTS Intensive Pro" && s.level === "C1+",
+        ),
+      );
 
-      const linkedSessions = store.classSessions.filter((cs) => cs.classId === "cls-ii-01");
+      const linkedSessions = await prisma.classSession.findMany({
+        where: { classroomId: "cls-ii-01" },
+      });
       if (linkedSessions.length > 0) {
         assert.ok(
           linkedSessions.every(
-            (cs) => cs.classCode === "II-01-PRO" && cs.className === "IELTS Intensive Pro",
+            (cs) =>
+              cs.classCode === "II-01-PRO" && cs.className === "IELTS Intensive Pro",
           ),
         );
       }
@@ -268,18 +415,18 @@ describe("Classroom Service — Quản lý Lớp học & Khung chương trình",
 
   describe("6. Tính toàn vẹn Dữ liệu Liên Module (Cross-Module Data Consistency)", () => {
     it("6.1. Khi học sinh bị lưu trữ mềm (archived), sĩ số lớp tự động giảm tương ứng", async () => {
-      const store = getRuntimeStore();
       const targetClassId = "cls-ii-01";
       const beforeClasses = await listClassrooms();
       const beforeClass = beforeClasses.find((c) => c.id === targetClassId)!;
       const initialEnrolled = beforeClass.enrolled;
 
-      // Find an active student in this class and archive them
-      const studentIdx = store.students.findIndex(
-        (s) => s.classId === targetClassId && s.status !== "archived",
-      );
-      assert.ok(studentIdx !== -1, "Phải có học sinh trong lớp để test");
-      store.students[studentIdx].status = "archived";
+      // Find an active student in this class and archive them via Prisma-backed studentService
+      const activeStudents = await studentService.listAllStudents({
+        classId: targetClassId,
+        status: "non-archived",
+      });
+      assert.ok(activeStudents.length > 0, "Phải có học sinh trong lớp để test");
+      await studentService.archiveStudent(activeStudents[0].id);
 
       // Re-query classrooms
       const afterClasses = await listClassrooms();
@@ -288,7 +435,6 @@ describe("Classroom Service — Quản lý Lớp học & Khung chương trình",
     });
 
     it("6.2. Sau khi tất cả học sinh được chuyển hoặc lưu trữ, lớp có thể được lưu trữ thành công", async () => {
-      const store = getRuntimeStore();
       // Create a new class with 1 student
       const newClass = await createClassroom({
         code: "SOLO-01",
@@ -299,27 +445,13 @@ describe("Classroom Service — Quản lý Lớp học & Khung chương trình",
         currentModule: "Module 1",
       });
 
-      // Add a student to this class in store
-      store.students.push({
-        id: "stu-solo-01",
+      const stu = await studentService.createStudent({
         code: "HS-SOLO-01",
         fullName: "Học Viên Thử Nghiệm",
         classId: newClass.id,
-        className: newClass.name,
-        level: "B2",
-        joinedAt: "2026-11-01",
-        attendanceRate: 100,
-        averageScore: 8.0,
         targetGoal: "IELTS 7.5",
         tuitionStatus: "paid",
-        tuitionPeriod: "Tháng 11",
         tuitionAmount: "5.000.000 ₫",
-        parentRelation: "Phụ huynh",
-        parentContactMasked: "0901 ••• 999",
-        status: "active",
-        recentComment: "Học tốt",
-        grades: [],
-        attendanceHistory: [],
       });
 
       // Verify cannot archive yet
@@ -328,9 +460,8 @@ describe("Classroom Service — Quản lý Lớp học & Khung chương trình",
         (err: unknown) => err instanceof ValidationError,
       );
 
-      // Archive the student
-      const stu = store.students.find((s) => s.id === "stu-solo-01")!;
-      stu.status = "archived";
+      // Archive the student via Prisma-backed studentService
+      await studentService.archiveStudent(stu.id);
 
       // Now archive the class should succeed
       const archived = await archiveClassroom(newClass.id);
@@ -516,19 +647,6 @@ describe("Classroom Service — Quản lý Lớp học & Khung chương trình",
         "Học sinh nắm vững cách viết Overview và chọn lọc số liệu nổi bật.",
       );
       assert.strictEqual(w1?.homework, "Cambridge IELTS 18 Test 2 Task 1");
-    });
-
-    it("7.8. resolveWeekStatus tính toán chính xác trạng thái tuần kế thừa khi chưa set explicit", () => {
-      const weekPast = { weekNumber: 1, title: "Tuần cũ" };
-      const weekCurrent = { weekNumber: 3, title: "Tuần hiện tại" };
-      const weekFuture = { weekNumber: 5, title: "Tuần tương lai" };
-      const weekExplicit = { weekNumber: 1, title: "Tuần cũ nhưng hoãn", status: "postponed" as const };
-
-      assert.strictEqual(resolveWeekStatus(weekPast, 3), "completed");
-      assert.strictEqual(resolveWeekStatus(weekCurrent, 3), "in-progress");
-      assert.strictEqual(resolveWeekStatus(weekFuture, 3), "not-started");
-      // Explicit status overrides position
-      assert.strictEqual(resolveWeekStatus(weekExplicit, 3), "postponed");
     });
 
     it("7.9. Giới hạn currentWeekIndex không vượt quá totalWeeks khi tạo mới hoặc thu gọn khung chương trình", async () => {
@@ -842,28 +960,16 @@ describe("Classroom Service — Quản lý Lớp học & Khung chương trình",
       });
       assert.strictEqual(cls.tuitionDueDate, "2026-11-25");
 
-      const store = getRuntimeStore();
-      // Giả lập 1 học sinh chưa đóng học phí ở lớp này
-      store.students.push({
-        id: "stu-fee-test",
+      // Tạo 1 học sinh chưa đóng học phí ở lớp này trong PostgreSQL
+      const feeStu = await studentService.createStudent({
         code: "HS-FEE-01",
         fullName: "Trần Học Phí",
         classId: cls.id,
-        className: cls.name,
-        level: "B1",
-        joinedAt: "2026-11-01",
         targetGoal: "IELTS 6.5",
         status: "active",
         tuitionStatus: "due-soon",
         tuitionPeriod: "Học kỳ II (Hạn 20/11/2026)",
         tuitionAmount: "7.500.000 ₫",
-        parentRelation: "Mẹ",
-        parentContactMasked: "090 •••• 123",
-        recentComment: "Tiến bộ tốt",
-        attendanceRate: 100,
-        averageScore: 7.0,
-        grades: [],
-        attendanceHistory: [],
       });
 
       // Cập nhật hạn học phí đến tương lai (2026-11-28 > 2026-11-18)
@@ -871,20 +977,349 @@ describe("Classroom Service — Quản lý Lớp học & Khung chương trình",
         tuitionDueDate: "2026-11-28",
       });
 
-      const updatedStore1 = getRuntimeStore();
-      const stu1 = updatedStore1.students.find((s) => s.id === "stu-fee-test");
-      assert.strictEqual(stu1?.tuitionStatus, "due-soon");
-      assert.strictEqual(stu1?.tuitionPeriod, "Học kỳ II (Hạn 28/11/2026)");
+      const stu1 = await studentService.getStudentById(feeStu.id);
+      assert.strictEqual(stu1.tuitionStatus, "due-soon");
+      assert.strictEqual(stu1.tuitionPeriod, "Học kỳ II (Hạn 28/11/2026)");
 
       // Cập nhật hạn học phí quá hạn (2026-11-10 < 2026-11-18)
       await updateClassroom(cls.id, {
         tuitionDueDate: "2026-11-10",
       });
 
-      const updatedStore2 = getRuntimeStore();
-      const stu2 = updatedStore2.students.find((s) => s.id === "stu-fee-test");
-      assert.strictEqual(stu2?.tuitionStatus, "overdue");
-      assert.strictEqual(stu2?.tuitionPeriod, "Học kỳ II (Quá hạn từ 10/11/2026)");
+      const stu2 = await studentService.getStudentById(feeStu.id);
+      assert.strictEqual(stu2.tuitionStatus, "overdue");
+      assert.strictEqual(stu2.tuitionPeriod, "Học kỳ II (Quá hạn từ 10/11/2026)");
+    });
+  });
+
+  describe("9. Nâng cấp Quản lý Lớp học & Khung chương trình 360° (3 Giai đoạn)", () => {
+    it("9.1. Kiểm tra chống trùng lịch (ConflictError) khi giao thoa thứ & khung giờ", async () => {
+      await createClassroom({
+        code: "CONF-A",
+        name: "Lớp Conflict A",
+        level: "IELTS 6.0+",
+        targetBand: "6.5",
+        scheduleSummary: "Thứ 2, Thứ 4 (08:00 - 09:30)",
+        room: "Phòng 901",
+        capacity: 15,
+        status: "active",
+      });
+
+      await assert.rejects(
+        () =>
+          createClassroom({
+            code: "CONF-B",
+            name: "Lớp Conflict B",
+            level: "IELTS 6.0+",
+            targetBand: "6.5",
+            scheduleSummary: "Thứ 2 (08:30 - 10:00)",
+            room: "Phòng 901",
+            capacity: 15,
+            status: "active",
+            validateScheduleConflict: true,
+          }),
+        ConflictError,
+      );
+
+      // Same day but non-overlapping time passes validation cleanly
+      const nonOverlapping = await createClassroom({
+        code: "CONF-C",
+        name: "Lớp Conflict C",
+        level: "IELTS 6.0+",
+        targetBand: "6.5",
+        scheduleSummary: "Thứ 2 (10:00 - 11:30)",
+        room: "Phòng 901",
+        capacity: 15,
+        status: "active",
+        validateScheduleConflict: true,
+      });
+      assert.strictEqual(nonOverlapping.code, "CONF-C");
+    });
+
+    it("9.2. Đồng bộ 2 chiều scheduleSummary <-> ClassSession trên DB & hydrate() không ghi đè", async () => {
+      const created = await createClassroom({
+        code: "SYNC-2W",
+        name: "Lớp Sync 2 Chiều",
+        level: "IELTS 6.5+",
+        targetBand: "7.0",
+        scheduleSummary: "Thứ 3, Thứ 5 (17:30 - 19:00)",
+        room: "Phòng 902",
+        capacity: 14,
+        status: "active",
+      });
+
+      let dbSessions = await prisma.classSession.findMany({
+        where: { classCode: "SYNC-2W" },
+      });
+      assert.strictEqual(dbSessions.length, 2);
+
+      await updateClassroom(created.id, {
+        scheduleSummary: "Thứ 4, Thứ 6 (18:00 - 19:30)",
+        room: "Phòng 903",
+      });
+
+      dbSessions = await prisma.classSession.findMany({
+        where: { classCode: "SYNC-2W" },
+      });
+      assert.strictEqual(dbSessions.length, 2);
+      assert.ok(dbSessions.some((s) => s.dayLabel === "Thứ Tư" && s.startTime === "18:00"));
+      assert.ok(dbSessions.some((s) => s.dayLabel === "Thứ Sáu" && s.room === "Phòng 903"));
+
+      // listClassrooms() must preserve explicit scheduleSummary instead of overwriting from sessions
+      const all = await listClassrooms();
+      const reloaded = all.find((c) => c.id === created.id);
+      assert.strictEqual(reloaded?.scheduleSummary, "Thứ 4, Thứ 6 (18:00 - 19:30)");
+    });
+
+    it("9.3. Tự động sinh scheduledDate từ startDate & markPreviousCompleted chốt các tuần trước", async () => {
+      const cls = await createClassroom({
+        code: "DATE-GEN",
+        name: "Lớp Khai Giảng Chuẩn",
+        level: "B2",
+        targetBand: "6.5",
+        scheduleSummary: "Thứ 7 (09:00 - 11:00)",
+        room: "Phòng 201",
+        capacity: 12,
+        startDate: "2026-10-05",
+        totalWeeks: 4,
+      });
+
+      assert.strictEqual(cls.curriculum?.[0]?.scheduledDate, "2026-10-05");
+      assert.strictEqual(cls.curriculum?.[1]?.scheduledDate, "2026-10-12");
+      assert.strictEqual(cls.curriculum?.[2]?.scheduledDate, "2026-10-19");
+      assert.strictEqual(cls.curriculum?.[3]?.scheduledDate, "2026-10-26");
+      assert.strictEqual(cls.expectedEndDate, "2026-10-26");
+
+      const updated = await updateClassroom(cls.id, {
+        currentWeekIndex: 3,
+        markPreviousCompleted: true,
+      });
+      assert.strictEqual(updated.curriculum?.[0]?.status, "completed");
+      assert.strictEqual(updated.curriculum?.[1]?.status, "completed");
+      assert.strictEqual(updated.curriculum?.[2]?.status, "in-progress");
+    });
+
+    it("9.4. Dời lịch nghỉ lễ (+7 ngày) tịnh tiến các tuần chưa hoàn thành & giữ nguyên tuần đã hoàn thành", async () => {
+      const cls = await createClassroom({
+        code: "SHIFT-01",
+        name: "Lớp Nghỉ Lễ",
+        level: "B2",
+        targetBand: "6.5",
+        scheduleSummary: "Chủ Nhật (09:00 - 11:00)",
+        room: "Phòng 202",
+        capacity: 12,
+        startDate: "2026-10-05",
+        totalWeeks: 4,
+      });
+      await updateClassroom(cls.id, {
+        currentWeekIndex: 3,
+        markPreviousCompleted: true,
+      });
+
+      const shifted = await shiftClassroomCurriculumDates(cls.id, {
+        fromWeekNumber: 3,
+        shiftDays: 7,
+      });
+      // Weeks 1 & 2 completed => unchanged; Weeks 3 & 4 shifted +7 days
+      assert.strictEqual(shifted.curriculum?.[0]?.scheduledDate, "2026-10-05");
+      assert.strictEqual(shifted.curriculum?.[1]?.scheduledDate, "2026-10-12");
+      assert.strictEqual(shifted.curriculum?.[2]?.scheduledDate, "2026-10-26");
+      assert.strictEqual(shifted.curriculum?.[3]?.scheduledDate, "2026-11-02");
+      assert.strictEqual(shifted.expectedEndDate, "2026-11-02");
+    });
+
+    it("9.5. Vòng đời lớp học: completeClassroom chốt khóa, chặn advanceClassroomWeek, activateClassroom mở lại", async () => {
+      const cls = await createClassroom({
+        code: "LIFE-01",
+        name: "Lớp Vòng Đời",
+        level: "C1",
+        targetBand: "7.5",
+        scheduleSummary: "Thứ 2 (19:30 - 21:00)",
+        room: "Phòng 305",
+        capacity: 10,
+        status: "active",
+      });
+
+      const completed = await completeClassroom(cls.id);
+      assert.strictEqual(completed.status, "completed");
+      assert.ok(completed.completedAt);
+      assert.strictEqual(
+        await prisma.classSession.count({ where: { classCode: "LIFE-01" } }),
+        0,
+      );
+
+      await assert.rejects(
+        () => advanceClassroomWeek(cls.id),
+        ValidationError,
+      );
+
+      const reactivated = await activateClassroom(cls.id);
+      assert.strictEqual(reactivated.status, "active");
+      assert.ok((await prisma.classSession.count({ where: { classCode: "LIFE-01" } })) > 0);
+    });
+
+    it("9.6. Nhân bản khóa học (cloneClassroom) giữ syllabus & reset trạng thái tuần sang upcoming", async () => {
+      const source = await createClassroom({
+        code: "SRC-K1",
+        name: "Lớp Gốc K1",
+        level: "IELTS 6.5+",
+        targetBand: "7.0",
+        scheduleSummary: "Thứ 3 (18:00 - 19:30)",
+        room: "Phòng 401",
+        capacity: 16,
+        startDate: "2026-09-01",
+        totalWeeks: 3,
+        curriculum: [
+          {
+            weekNumber: 1,
+            title: "Essay Architecture",
+            status: "completed",
+            homework: "Write 250 words",
+            attachments: [
+              {
+                id: "att-clone-1",
+                name: "Guide.pdf",
+                type: "PDF",
+                size: "1.2 MB",
+                url: "/uploads/guide.pdf",
+                uploadedAt: "01/09/2026",
+              },
+            ],
+          },
+          { weekNumber: 2, title: "Listening Part 3", status: "in-progress" },
+          { weekNumber: 3, title: "Mock Test 1", status: "not-started", isAssessmentMilestone: true, assessmentTitle: "Mid-term Mock" },
+        ],
+      });
+
+      const cloned = await cloneClassroom(source.id, {
+        code: "SRC-K2",
+        name: "Lớp Kế Tiếp K2",
+        status: "upcoming",
+        startDate: "2026-12-01",
+        copyMaterials: true,
+      });
+
+      assert.strictEqual(cloned.code, "SRC-K2");
+      assert.strictEqual(cloned.status, "upcoming");
+      assert.strictEqual(cloned.enrolled, 0);
+      assert.strictEqual(cloned.currentWeekIndex, 1);
+      assert.strictEqual(cloned.curriculum?.[0]?.status, "in-progress");
+      assert.strictEqual(cloned.curriculum?.[1]?.status, "not-started");
+      assert.strictEqual(cloned.curriculum?.[0]?.scheduledDate, "2026-12-01");
+      assert.strictEqual(cloned.curriculum?.[0]?.attachments?.length, 1);
+    });
+
+    it("9.7. Tạo, liệt kê và xóa Giáo trình mẫu tùy chỉnh (bảo vệ mẫu hệ thống mặc định)", async () => {
+      const cls = (await listClassrooms())[0];
+      const createdTpl = await saveClassroomAsTemplate(cls.id, {
+        name: "Mẫu Khung Chuyên Sâu Test",
+      });
+      assert.strictEqual(createdTpl.isCustom, true);
+
+      const templates = await listCurriculumTemplates();
+      assert.ok(templates.some((t) => t.id === createdTpl.id));
+
+      const systemPreset = templates.find((t) => !t.isCustom);
+      assert.ok(systemPreset, "Phải có ít nhất 1 mẫu mặc định của hệ thống");
+      await assert.rejects(
+        () => deleteCurriculumTemplate(systemPreset.id),
+        ValidationError,
+      );
+
+      const deleted = await deleteCurriculumTemplate(createdTpl.id);
+      assert.strictEqual(deleted, true);
+      assert.ok(!(await listCurriculumTemplates()).some((t) => t.id === createdTpl.id));
+    });
+
+    it("9.8. Upload tài liệu tuần học kiểm tra Magic Bytes, lưu UUID & ghi AuditLog", async () => {
+      const cls = (await listClassrooms())[0];
+      const fakeExe = Buffer.from("MZ\x90\x00fake-executable-payload");
+
+      await assert.rejects(
+        () =>
+          uploadCurriculumAttachment({
+            fileName: "trojan-disguised.pdf",
+            mimeType: "application/pdf",
+            sizeBytes: fakeExe.length,
+            classId: cls.id,
+            weekNumber: 1,
+            actorRole: "admin",
+            fileBuffer: fakeExe,
+          }),
+        ValidationError,
+      );
+
+      const validPdf = Buffer.from("%PDF-1.4\n%Test syllabus attachment content");
+      const res = await uploadCurriculumAttachment({
+        fileName: "Reading Week 1.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: validPdf.length,
+        classId: cls.id,
+        classCode: cls.code,
+        weekNumber: 1,
+        actorRole: "admin",
+        fileBuffer: validPdf,
+      });
+
+      assert.notStrictEqual(res.storedFile.storedName, "Reading Week 1.pdf");
+      assert.strictEqual(res.attachment.storedFileId, res.storedFile.id);
+      const [storedFiles, resourceFiles, auditLogs] = await Promise.all([
+        listStoredFiles(),
+        listResourceFiles(),
+        listStorageAuditLogs(),
+      ]);
+      assert.ok(storedFiles.some((f) => f.id === res.storedFile.id));
+      assert.ok(resourceFiles.some((f) => f.id === res.storedFile.id));
+      assert.ok(auditLogs.some((a) => a.targetId === res.storedFile.id));
+    });
+
+    it("9.10. Khép vòng Điểm danh: tự sinh ClassSessionRecord gắn weekNumber & tách riêng HS bảo lưu", async () => {
+      const classes = await listClassrooms();
+      const targetClass = classes[0];
+      const classStudents = await studentService.listAllStudents({
+        classId: targetClass.id,
+        status: "non-archived",
+      });
+      assert.ok(classStudents.length > 0);
+
+      const leaveStu = classStudents[0];
+      await studentService.updateStudent(leaveStu.id, {
+        status: "on-leave",
+        leaveReason: "Thi học sinh giỏi",
+      });
+
+      const targetDate = "2026-11-28";
+      const result = await recordAttendance({
+        sessionId: `manual-${targetClass.id}`,
+        date: targetDate,
+        entries: classStudents
+          .filter((s) => s.id !== leaveStu.id)
+          .map((s, idx) => ({
+            studentId: s.id,
+            status: idx === 0 ? "late" : "present",
+            note: idx === 0 ? "Kẹt xe 10 phút" : "",
+          })),
+      });
+
+      assert.ok(
+        result.classSessionId,
+        "Phải tự tạo draft ClassSessionRecord cho ngày điểm danh",
+      );
+      const createdCs = await teachingJournalService.getClassSessionById(
+        result.classSessionId,
+      );
+      assert.strictEqual(createdCs.classId, targetClass.id);
+      assert.strictEqual(
+        createdCs.weekNumber,
+        targetClass.currentWeekIndex ?? 1,
+      );
+
+      const snapshot = await getAttendanceSnapshot({
+        classId: targetClass.id,
+        date: targetDate,
+      });
+      assert.strictEqual(snapshot.onLeaveStudents.length >= 1, true);
+      assert.ok(snapshot.onLeaveStudents.some((s) => s.id === leaveStu.id));
     });
   });
 });

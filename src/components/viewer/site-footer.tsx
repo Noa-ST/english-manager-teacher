@@ -1,9 +1,48 @@
+"use client";
+
+import * as React from "react";
 import Link from "next/link";
 import { BookOpen, Clock, Headphones, Mail, MapPin, Newspaper, ShieldCheck } from "lucide-react";
+import { apiRequest } from "@/lib/api-client";
 import { VIEWER_NAV } from "@/lib/routes";
-import { TEACHER_PROFILE } from "@/services/classroom-data";
+import type { TeacherProfile } from "@/services/classroom-data";
+
+const EMPTY_TEACHER_PROFILE: TeacherProfile = {
+  name: "",
+  title: "",
+  credentials: [],
+  slogan: "",
+  shortBio: "",
+  philosophy: "",
+  experienceYears: 0,
+  totalStudents: 0,
+  bandAchievementRate: "",
+  email: "",
+  avatarUrl: "/images/teacher-avatar.jpg",
+  officeHours: "",
+  location: "",
+  socials: [],
+};
 
 export function SiteFooter() {
+  const [profile, setProfile] = React.useState<TeacherProfile>(
+    EMPTY_TEACHER_PROFILE,
+  );
+
+  React.useEffect(() => {
+    let active = true;
+    apiRequest<{ teacher?: TeacherProfile }>("/api/viewer/overview")
+      .then((res) => {
+        if (!active || !res?.teacher) return;
+        setProfile(res.teacher);
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   return (
     <footer className="relative mt-16 overflow-hidden bg-[#1E3458] text-white">
       {/* Main 4-Column Footer Grid */}
@@ -58,7 +97,7 @@ export function SiteFooter() {
               Learn English. Grow Together.
             </p>
             <p className="mt-2 text-xs leading-relaxed text-white/70">
-              {TEACHER_PROFILE.name} · {TEACHER_PROFILE.title}
+              {profile.name} · {profile.title}
             </p>
           </div>
 
@@ -70,15 +109,15 @@ export function SiteFooter() {
             <ul className="mt-4 space-y-3 text-xs leading-relaxed text-white/85">
               <li className="flex items-start gap-2.5">
                 <MapPin className="mt-0.5 size-4 shrink-0 text-[#D9AE54]" aria-hidden="true" />
-                <span>{TEACHER_PROFILE.location}</span>
+                <span>{profile.location}</span>
               </li>
               <li className="flex items-start gap-2.5">
                 <Mail className="mt-0.5 size-4 shrink-0 text-[#D9AE54]" aria-hidden="true" />
-                <span>{TEACHER_PROFILE.email}</span>
+                <span>{profile.email}</span>
               </li>
               <li className="flex items-start gap-2.5">
                 <Clock className="mt-0.5 size-4 shrink-0 text-[#D9AE54]" aria-hidden="true" />
-                <span>{TEACHER_PROFILE.officeHours}</span>
+                <span>{profile.officeHours}</span>
               </li>
             </ul>
           </div>
@@ -126,16 +165,29 @@ export function SiteFooter() {
             </div>
 
             <ul className="mt-4 space-y-1.5 text-xs text-white/75">
-              {TEACHER_PROFILE.socials.map((soc) => (
-                <li key={soc.label}>
-                  <Link
-                    href={soc.href as never}
-                    className="transition-colors hover:text-[#F7F0E2] hover:underline"
-                  >
-                    {soc.label}: <span className="font-medium text-white">{soc.handle}</span>
-                  </Link>
-                </li>
-              ))}
+              {profile.socials.map((soc) => {
+                const rawHref = soc.href?.trim() ?? "";
+                const safeHref =
+                  (rawHref.startsWith("/") &&
+                    !rawHref.startsWith("//") &&
+                    !rawHref.startsWith("/\\")) ||
+                  rawHref.startsWith("https://") ||
+                  rawHref.startsWith("http://") ||
+                  rawHref.startsWith("mailto:") ||
+                  rawHref.startsWith("tel:")
+                    ? rawHref
+                    : "#";
+                return (
+                  <li key={`${soc.label}-${soc.href}`}>
+                    <Link
+                      href={safeHref as never}
+                      className="transition-colors hover:text-[#F7F0E2] hover:underline"
+                    >
+                      {soc.label}: <span className="font-medium text-white">{soc.handle}</span>
+                    </Link>
+                  </li>
+                );
+              })}
             </ul>
           </div>
 
@@ -148,7 +200,7 @@ export function SiteFooter() {
               — W.B. Yeats
             </p>
             <p className="relative z-10 mt-3 text-[11px] leading-relaxed text-white/65">
-              “{TEACHER_PROFILE.philosophy}”
+              “{profile.philosophy}”
             </p>
 
             {/* Subtle Decorative Open Book Watermark */}
@@ -176,7 +228,7 @@ export function SiteFooter() {
       {/* Bottom Copyright & Policy Links */}
       <div className="border-t border-white/10 bg-[#182B49]">
         <div className="mx-auto flex max-w-[1360px] flex-col items-center justify-between gap-3 px-4 py-4 text-xs text-white/70 sm:flex-row sm:px-8 lg:px-10">
-          <p>© 2026 English Manager · {TEACHER_PROFILE.name}. All rights reserved.</p>
+          <p>© 2026 English Manager · {profile.name}. All rights reserved.</p>
           <div className="flex flex-wrap items-center gap-3">
             {VIEWER_NAV.slice(0, 3).map((item, idx) => (
               <span key={item.href} className="inline-flex items-center gap-3">

@@ -1,79 +1,282 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import {
-  ArrowRight,
-  Calendar,
-  Clock,
-  Download,
-  FileText,
-  Megaphone,
-  Pin,
-  Search,
-} from "lucide-react";
-import {
-  ANNOUNCEMENTS_DATA,
-  type AnnouncementCategory,
-  type AnnouncementItem,
+import { useSearchParams } from "next/navigation";
+import type {
+  AnnouncementAttachment,
+  AnnouncementCategory,
+  AnnouncementItem,
 } from "@/services/classroom-data";
+import {
+  countAnnouncementsByCategory,
+  extractUniqueTargetClasses,
+  filterAndSortAnnouncements,
+  selectHeroAnnouncement,
+} from "@/services/announcement-helpers";
 import { apiRequest } from "@/lib/api-client";
+import { AnnouncementCard } from "@/components/viewer/announcements/announcement-card";
+import { AnnouncementHeroCard } from "@/components/viewer/announcements/announcement-hero-card";
+import { AnnouncementToolbar } from "@/components/viewer/announcements/announcement-toolbar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { EmptyState, Breadcrumb } from "@/components/ui/feedback";
-import { Input } from "@/components/ui/input";
+import {
+  Breadcrumb,
+  EmptyState,
+  PaginationBar,
+  Skeleton,
+} from "@/components/ui/feedback";
 import { useToast } from "@/components/ui/toast";
-import { cn } from "@/lib/utils";
 
-const CATEGORY_FILTERS: { value: "all" | AnnouncementCategory; label: string }[] = [
-  { value: "all", label: "Tất cả thông báo" },
-  { value: "urgent", label: "Thông báo quan trọng" },
-  { value: "event", label: "Sự kiện học thuật" },
-  { value: "homework", label: "Bài tập tuần" },
-  { value: "schedule", label: "Lịch học" },
-  { value: "tuition", label: "Học phí & Học vụ" },
-];
+const VALID_CATEGORIES = new Set<string>([
+  "all",
+  "urgent",
+  "event",
+  "homework",
+  "schedule",
+  "tuition",
+]);
 
-export default function AnnouncementsPage() {
+function parseCategoryParam(raw: string | null): "all" | AnnouncementCategory {
+  if (raw && VALID_CATEGORIES.has(raw)) {
+    return raw as "all" | AnnouncementCategory;
+  }
+  return "all";
+}
+
+function AnnouncementsFeedContent() {
+  const searchParams = useSearchParams();
   const { toast } = useToast();
-  const [announcements, setAnnouncements] =
-    React.useState<AnnouncementItem[]>(ANNOUNCEMENTS_DATA);
+
+  const [announcements, setAnnouncements] = React.useState<AnnouncementItem[]>([]);
   const [selectedCategory, setSelectedCategory] = React.useState<
     "all" | AnnouncementCategory
-  >("all");
-  const [searchQuery, setSearchQuery] = React.useState("");
+  >(() => parseCategoryParam(searchParams.get("category")));
+  const [selectedClass, setSelectedClass] = React.useState<string>(
+    () => searchParams.get("class") ?? "all",
+  );
+  const [onlyWithAttachments, setOnlyWithAttachments] = React.useState<boolean>(
+    () => searchParams.get("attachments") === "1",
+  );
+  const [searchQuery, setSearchQuery] = React.useState<string>(
+    () => searchParams.get("q") ?? "",
+  );
+  const [downloadingAttId, setDownloadingAttId] = React.useState<string | null>(
+    null,
+  );
+
+  // Pagination state
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(6);
 
   React.useEffect(() => {
+    let active = true;
     apiRequest<AnnouncementItem[]>("/api/viewer/announcements")
-      .then(setAnnouncements)
-      .catch(() => {});
+      .then((res) => {
+        if (!active || !Array.isArray(res)) return;
+        setAnnouncements(res.filter((item) => item.status === "published"));
+      })
+      .catch(() => {
+        // Keep seed fallback cleanly
+      });
+
+    return () => {
+      active = false;
+    };
   }, []);
 
-  const urgentAnnouncement = React.useMemo(
-    () => announcements.find((item) => item.isUrgent),
+  const syncUrlParams = (next: {
+    category: "all" | AnnouncementCategory;
+    cls: string;
+    attachments: boolean;
+    q: string;
+  }) => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams();
+    if (next.category !== "all") params.set("category", next.category);
+    if (next.cls !== "all") params.set("class", next.cls);
+    if (next.attachments) params.set("attachments", "1");
+    if (next.q.trim()) params.set("q", next.q.trim());
+    const qs = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      qs ? `/announcements?${qs}` : "/announcements",
+    );
+  };
+
+  const hasActiveFilters =
+    selectedCategory !== "all" ||
+    selectedClass !== "all" ||
+    onlyWithAttachments ||
+    searchQuery.trim().length > 0;
+
+  const categoryCounts = React.useMemo(
+    () => countAnnouncementsByCategory(announcements),
+    [announcements],
+  );
+  const availableClasses = React.useMemo(
+    () => extractUniqueTargetClasses(announcements),
+    [announcements],
+  );
+  const heroAnnouncement = React.useMemo(
+    () => selectHeroAnnouncement(announcements),
     [announcements],
   );
 
-  const filteredAnnouncements = React.useMemo(() => {
-    return announcements.filter((item) => {
-      const matchesCategory =
-        selectedCategory === "all" || item.category === selectedCategory;
-      const query = searchQuery.trim().toLowerCase();
-      const matchesSearch =
-        !query ||
-        item.title.toLowerCase().includes(query) ||
-        item.excerpt.toLowerCase().includes(query) ||
-        item.targetClasses.some((cls) => cls.toLowerCase().includes(query));
-      return matchesCategory && matchesSearch;
-    });
-  }, [announcements, selectedCategory, searchQuery]);
+  const showHero = Boolean(!hasActiveFilters && heroAnnouncement);
 
-  const handleDownloadAttachment = (fileName: string, size: string) => {
-    toast({
-      title: "Đang tải tệp đính kèm",
-      description: `Tệp ${fileName} (${size}) đang được tải xuống.`,
-      variant: "success",
+  const filteredAnnouncements = React.useMemo(
+    () =>
+      filterAndSortAnnouncements(announcements, {
+        category: selectedCategory,
+        targetClass: selectedClass,
+        search: searchQuery,
+        onlyWithAttachments,
+        excludeId: showHero ? heroAnnouncement?.id : undefined,
+      }),
+    [
+      announcements,
+      selectedCategory,
+      selectedClass,
+      searchQuery,
+      onlyWithAttachments,
+      showHero,
+      heroAnnouncement?.id,
+    ],
+  );
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filteredAnnouncements.length / pageSize),
+  );
+  const currentPage = Math.min(page, totalPages);
+  const paginatedAnnouncements = React.useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredAnnouncements.slice(start, start + pageSize);
+  }, [filteredAnnouncements, currentPage, pageSize]);
+
+  const handleSelectCategory = (cat: "all" | AnnouncementCategory) => {
+    setSelectedCategory(cat);
+    setPage(1);
+    syncUrlParams({
+      category: cat,
+      cls: selectedClass,
+      attachments: onlyWithAttachments,
+      q: searchQuery,
     });
+  };
+
+  const handleSelectClass = (cls: string) => {
+    setSelectedClass(cls);
+    setPage(1);
+    syncUrlParams({
+      category: selectedCategory,
+      cls,
+      attachments: onlyWithAttachments,
+      q: searchQuery,
+    });
+  };
+
+  const handleToggleAttachments = () => {
+    const next = !onlyWithAttachments;
+    setOnlyWithAttachments(next);
+    setPage(1);
+    syncUrlParams({
+      category: selectedCategory,
+      cls: selectedClass,
+      attachments: next,
+      q: searchQuery,
+    });
+  };
+
+  const handleSearchChange = (q: string) => {
+    setSearchQuery(q);
+    setPage(1);
+    syncUrlParams({
+      category: selectedCategory,
+      cls: selectedClass,
+      attachments: onlyWithAttachments,
+      q,
+    });
+  };
+
+  const handleResetFilters = () => {
+    setSelectedCategory("all");
+    setSelectedClass("all");
+    setOnlyWithAttachments(false);
+    setSearchQuery("");
+    setPage(1);
+    syncUrlParams({
+      category: "all",
+      cls: "all",
+      attachments: false,
+      q: "",
+    });
+  };
+
+  const handleDownloadAttachment = async (
+    annId: string,
+    att: AnnouncementAttachment,
+  ) => {
+    setDownloadingAttId(att.id);
+    try {
+      const res = await apiRequest<{
+        announcementId: string;
+        attachmentId: string;
+        downloadCount: number;
+        url: string | null;
+      }>(`/api/viewer/announcements/${encodeURIComponent(annId)}`, {
+        method: "POST",
+        body: JSON.stringify({ attachmentId: att.id }),
+      });
+
+      setAnnouncements((prev) =>
+        prev.map((ann) =>
+          ann.id !== annId
+            ? ann
+            : {
+                ...ann,
+                attachments: ann.attachments.map((item) =>
+                  item.id === att.id
+                    ? { ...item, downloadCount: res.downloadCount }
+                    : item,
+                ),
+              },
+        ),
+      );
+
+      const targetUrl = res.url ?? att.url ?? null;
+      if (
+        targetUrl &&
+        (targetUrl.startsWith("https://") ||
+          targetUrl.startsWith("http://") ||
+          targetUrl.startsWith("/"))
+      ) {
+        window.open(targetUrl, "_blank", "noopener,noreferrer");
+        toast({
+          title: "Đang tải tệp đính kèm",
+          description: `${att.name} (${att.size}) — ${res.downloadCount} lượt tải.`,
+          variant: "success",
+        });
+      } else {
+        toast({
+          title: "Bản tin mẫu chưa gắn tệp gốc",
+          description: `Đã ghi nhận lượt quan tâm (${res.downloadCount}). Xem bản tài liệu công khai đầy đủ tại mục Tài liệu.`,
+          variant: "info",
+        });
+      }
+    } catch (err) {
+      toast({
+        title: "Không thể tải tệp đính kèm",
+        description:
+          err instanceof Error
+            ? err.message
+            : "Đã xảy ra lỗi khi kết nối máy chủ.",
+        variant: "error",
+      });
+    } finally {
+      setDownloadingAttId(null);
+    }
   };
 
   return (
@@ -88,230 +291,108 @@ export default function AnnouncementsPage() {
         />
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
           <div>
-            <p className="text-xs font-semibold tracking-wider text-accent uppercase">
+            <p className="text-xs font-semibold tracking-wider text-primary uppercase">
               Editorial Academic Feed
             </p>
             <h1 className="mt-1 font-heading text-3xl font-bold text-foreground sm:text-4xl">
-              Bảng tin & Thông báo lớp học
+              Bảng tin &amp; Thông báo lớp học
             </h1>
             <p className="mt-1.5 max-w-2xl text-sm text-muted-foreground">
-              Cập nhật chính thức về lịch thi thử, bài tập trọng tâm hàng tuần, sự kiện chuyên đề
-              và thông tin học vụ dành cho học sinh và phụ huynh.
+              Cập nhật chính thức về lịch thi thử, bài tập trọng tâm hàng tuần,
+              sự kiện chuyên đề và thông tin học vụ dành cho học sinh và phụ
+              huynh.
             </p>
           </div>
           <Badge variant="warm" className="self-start sm:self-auto">
-            Tổng cộng {ANNOUNCEMENTS_DATA.length} bản tin đã xuất bản
+            Tổng cộng {announcements.length} bản tin đã xuất bản
           </Badge>
         </div>
       </div>
 
-      {/* Pinned / Urgent Hero Card */}
-      {urgentAnnouncement && selectedCategory === "all" && !searchQuery && (
-        <div className="rounded-2xl border border-highlight/60 bg-gradient-to-br from-warm/85 via-card to-card p-6 shadow-xs sm:p-8">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="highlight">
-                <Megaphone className="size-3" aria-hidden="true" />
-                Ưu tiên khẩn · {urgentAnnouncement.categoryLabel}
-              </Badge>
-              <Badge variant="outline" className="bg-card">
-                <Pin className="size-3 text-primary" aria-hidden="true" />
-                Ghim đầu trang
-              </Badge>
-            </div>
-            <div className="flex items-center gap-3 text-xs text-muted-foreground">
-              <span className="inline-flex items-center gap-1">
-                <Calendar className="size-3.5" aria-hidden="true" />
-                {urgentAnnouncement.publishedAt}
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <Clock className="size-3.5" aria-hidden="true" />
-                {urgentAnnouncement.readTime}
-              </span>
-            </div>
-          </div>
-
-          <h2 className="mt-4 font-heading text-xl font-bold text-foreground sm:text-2xl">
-            <Link
-              href={`/announcements/${urgentAnnouncement.id}`}
-              className="hover:text-primary hover:underline"
-            >
-              {urgentAnnouncement.title}
-            </Link>
-          </h2>
-          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted-foreground">
-            {urgentAnnouncement.excerpt}
-          </p>
-
-          {urgentAnnouncement.attachments.length > 0 && (
-            <div className="mt-5 flex flex-wrap gap-2.5">
-              {urgentAnnouncement.attachments.map((att) => (
-                <button
-                  key={att.id}
-                  type="button"
-                  onClick={() => handleDownloadAttachment(att.name, att.size)}
-                  className="inline-flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 py-2 text-xs font-medium text-foreground shadow-2xs transition-colors hover:border-primary/40 hover:bg-muted/60"
-                >
-                  <FileText className="size-3.5 text-primary" aria-hidden="true" />
-                  <span>{att.name}</span>
-                  <span className="text-muted-foreground">({att.size})</span>
-                  <Download className="size-3.5 text-accent" aria-hidden="true" />
-                </button>
-              ))}
-            </div>
-          )}
-
-          <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border-t border-border/80 pt-4">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-xs text-muted-foreground">Áp dụng cho:</span>
-              {urgentAnnouncement.targetClasses.map((cls) => (
-                <Badge key={cls} variant="secondary">
-                  {cls}
-                </Badge>
-              ))}
-            </div>
-            <Button
-              size="sm"
-              render={<Link href={`/announcements/${urgentAnnouncement.id}`} />}
-              nativeButton={false}
-            >
-              Đọc toàn văn thông báo
-              <ArrowRight className="size-3.5" aria-hidden="true" />
-            </Button>
-          </div>
-        </div>
+      {/* Pinned / Urgent Hero Card (rendered only when no filter active, excluded from grid below) */}
+      {showHero && heroAnnouncement && (
+        <AnnouncementHeroCard
+          item={heroAnnouncement}
+          downloadingAttId={downloadingAttId}
+          onDownloadAttachment={(annId, att) =>
+            void handleDownloadAttachment(annId, att)
+          }
+          onSelectClass={handleSelectClass}
+        />
       )}
 
       {/* Filter & Search Toolbar */}
-      <div className="flex flex-col justify-between gap-4 rounded-2xl border border-border bg-card p-4 sm:flex-row sm:items-center">
-        <div
-          className="flex flex-wrap items-center gap-1.5"
-          role="tablist"
-          aria-label="Lọc thông báo theo danh mục"
-        >
-          {CATEGORY_FILTERS.map((cat) => {
-            const active = selectedCategory === cat.value;
-            return (
-              <button
-                key={cat.value}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => setSelectedCategory(cat.value)}
-                className={cn(
-                  "rounded-xl px-3 py-1.5 text-xs font-medium transition-colors",
-                  active
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                )}
-              >
-                {cat.label}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="relative w-full sm:w-72">
-          <Search
-            className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
-            aria-hidden="true"
-          />
-          <Input
-            type="search"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Tìm theo tiêu đề, tên lớp..."
-            aria-label="Tìm kiếm thông báo"
-            className="pl-9"
-          />
-        </div>
-      </div>
+      <AnnouncementToolbar
+        selectedCategory={selectedCategory}
+        onSelectCategory={handleSelectCategory}
+        categoryCounts={categoryCounts}
+        availableClasses={availableClasses}
+        selectedClass={selectedClass}
+        onSelectClass={handleSelectClass}
+        onlyWithAttachments={onlyWithAttachments}
+        onToggleAttachments={handleToggleAttachments}
+        searchQuery={searchQuery}
+        onSearchChange={handleSearchChange}
+        hasActiveFilters={hasActiveFilters}
+        onResetFilters={handleResetFilters}
+      />
 
       {/* Announcements List */}
       {filteredAnnouncements.length === 0 ? (
         <EmptyState
           title="Không tìm thấy thông báo phù hợp"
-          description="Thử thay đổi bộ lọc danh mục hoặc từ khóa tìm kiếm để xem các bản tin khác."
+          description="Thử thay đổi bộ lọc danh mục, lớp áp dụng hoặc từ khóa tìm kiếm để xem các bản tin khác."
           action={
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setSelectedCategory("all");
-                setSearchQuery("");
-              }}
-            >
-              Xóa bộ lọc
+            <Button variant="outline" size="sm" onClick={handleResetFilters}>
+              Xóa toàn bộ bộ lọc
             </Button>
           }
         />
       ) : (
-        <div className="grid gap-5 md:grid-cols-2">
-          {filteredAnnouncements.map((item) => (
-            <article
-              key={item.id}
-              className="flex flex-col justify-between rounded-2xl border border-border bg-card p-6 transition-all hover:border-accent/50 hover:shadow-xs"
-            >
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                  <div className="flex items-center gap-2">
-                    <Badge variant={item.isUrgent ? "highlight" : "secondary"}>
-                      {item.categoryLabel}
-                    </Badge>
-                    {item.isPinned && (
-                      <span className="inline-flex items-center gap-1 font-medium text-primary">
-                        <Pin className="size-3" aria-hidden="true" />
-                        Đã ghim
-                      </span>
-                    )}
-                  </div>
-                  <span>
-                    {item.publishedAt} · {item.readTime}
-                  </span>
-                </div>
+        <div className="space-y-6">
+          <div className="grid gap-5 md:grid-cols-2">
+            {paginatedAnnouncements.map((item) => (
+              <AnnouncementCard
+                key={item.id}
+                item={item}
+                onSelectClass={handleSelectClass}
+              />
+            ))}
+          </div>
 
-                <h2 className="font-heading text-lg font-bold text-foreground">
-                  <Link
-                    href={`/announcements/${item.id}`}
-                    className="transition-colors hover:text-primary"
-                  >
-                    {item.title}
-                  </Link>
-                </h2>
-
-                <p className="text-sm leading-relaxed text-muted-foreground">{item.excerpt}</p>
-
-                <div className="flex flex-wrap gap-1.5 pt-1">
-                  {item.targetClasses.map((cls) => (
-                    <Badge key={cls} variant="outline" className="text-[11px]">
-                      {cls}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-
-              <div className="mt-6 flex items-center justify-between border-t border-border pt-4">
-                <span className="text-xs text-muted-foreground">
-                  {item.attachments.length > 0
-                    ? `${item.attachments.length} tệp đính kèm`
-                    : "Bản tin văn bản"}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  render={<Link href={`/announcements/${item.id}`} />}
-                  nativeButton={false}
-                  className="text-primary"
-                >
-                  Xem chi tiết
-                  <ArrowRight className="size-3.5" aria-hidden="true" />
-                </Button>
-              </div>
-            </article>
-          ))}
+          <PaginationBar
+            page={currentPage}
+            totalPages={totalPages}
+            totalItems={filteredAnnouncements.length}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={(sz) => {
+              setPageSize(sz);
+              setPage(1);
+            }}
+            pageSizeOptions={[4, 6, 10, 20]}
+          />
         </div>
       )}
     </div>
   );
 }
 
+export default function AnnouncementsPage() {
+  return (
+    <React.Suspense
+      fallback={
+        <div className="mx-auto max-w-7xl space-y-8 px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
+          <Skeleton className="h-24 w-full rounded-2xl" />
+          <Skeleton className="h-56 w-full rounded-2xl" />
+          <div className="grid gap-5 md:grid-cols-2">
+            <Skeleton className="h-52 w-full rounded-2xl" />
+            <Skeleton className="h-52 w-full rounded-2xl" />
+          </div>
+        </div>
+      }
+    >
+      <AnnouncementsFeedContent />
+    </React.Suspense>
+  );
+}

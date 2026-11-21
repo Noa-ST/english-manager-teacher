@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { prisma } from "@/lib/db/prisma";
 import { getServerEnv } from "@/lib/env";
 import {
   buildCloudinaryUrl,
@@ -14,14 +15,16 @@ import {
 } from "@/lib/storage";
 import type { FileVisibility, Role, StorageProviderName } from "@/types";
 
+import { idSchema, optionalSafeUrlSchema, validate } from "./common";
+import { matchesNormalizedDocumentText } from "./documents-helpers";
 import type {
+  CurriculumAttachment,
   OrphanedStorageObject,
   ResourceFileItem,
   ResourceFolder,
   StorageAuditLogEntry,
   StoredFileRecord,
-} from "./classroom-data";
-import { idSchema, validate } from "./common";
+} from "./domain-types";
 import {
   ConflictError,
   ForbiddenError,
@@ -29,13 +32,19 @@ import {
   UnauthorizedError,
   ValidationError,
 } from "./errors";
-import { getRuntimeStore, saveRuntimeStore } from "./runtime-store";
+import {
+  mapPrismaOrphanedStorageFile,
+  mapPrismaResourceFile,
+  mapPrismaResourceFolder,
+  mapPrismaStorageAuditLog,
+  mapPrismaStoredFile,
+} from "./prisma-mappers";
 
 /**
  * Unified Multi-Provider Storage Service
- * - Cloudinary Free: Images (avatars, projects, podcast thumbnails, announcements, articles, resources)
+ * - Cloudinary Free: Images (teacher avatar, projects, podcast thumbnails, announcements, articles, resources)
  * - Supabase Free Storage: Podcasts (MP3/M4A) & PDFs (public & private buckets)
- * - PostgreSQL / RuntimeStore: Metadata, access control, reference tracking, quota & audit logs
+ * - PostgreSQL (Prisma): Metadata, access control, reference tracking, quota & audit logs
  */
 
 const MB = 1024 * 1024;
@@ -95,6 +104,17 @@ export function checkUploadRateLimit(
     );
   }
   timestamps.push(now);
+  if (uploadRateBuckets.size >= 5000 && !uploadRateBuckets.has(key)) {
+    for (const [bKey, bList] of uploadRateBuckets) {
+      const fresh = bList.filter((ts) => now - ts < RATE_LIMIT_WINDOW_MS);
+      if (fresh.length === 0) uploadRateBuckets.delete(bKey);
+      else uploadRateBuckets.set(bKey, fresh);
+    }
+    if (uploadRateBuckets.size >= 5000) {
+      const oldest = uploadRateBuckets.keys().next().value;
+      if (oldest !== undefined) uploadRateBuckets.delete(oldest);
+    }
+  }
   uploadRateBuckets.set(key, timestamps);
 }
 
@@ -166,7 +186,12 @@ export function verifyFileMagicBytes(
   bytes: Uint8Array | Buffer | undefined,
   expectedFamily: "image" | "audio" | "pdf",
 ): void {
-  if (!bytes || bytes.length < 4) return;
+  if (bytes === undefined) return;
+  if (bytes.length < 4) {
+    throw new ValidationError(
+      "Nội dung tệp tải lên quá nhỏ hoặc rỗng, không thể xác thực chữ ký tệp (magic bytes).",
+    );
+  }
 
   // Always block Windows PE (MZ) and Linux ELF binaries
   if (bytes[0] === 0x4d && bytes[1] === 0x5a) {
@@ -253,21 +278,37 @@ function formatBytesLabel(sizeBytes: number): string {
   return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
 }
 
-function recordAuditLog(
+async function recordAuditLog(
   entry: Omit<StorageAuditLogEntry, "id" | "createdAt">,
-): void {
-  const store = getRuntimeStore();
+): Promise<void> {
   // Never allow signed tokens or secrets into audit log details
   const redactedDetail = entry.detail
     .replace(/token=[^&\s]+/gi, "token=[REDACTED]")
     .replace(/signature=[^&\s]+/gi, "signature=[REDACTED]");
 
-  store.storageAuditLogs.unshift({
-    ...entry,
-    detail: redactedDetail,
-    id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    createdAt: new Date().toISOString(),
+  await prisma.storageAuditLog.create({
+    data: {
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      action: entry.action,
+      provider: entry.provider,
+      actorId: entry.actorId,
+      targetId: entry.targetId,
+      targetPath: entry.targetPath,
+      status: entry.status,
+      detail: redactedDetail,
+    },
   });
+
+  const overflow = await prisma.storageAuditLog.findMany({
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    skip: 500,
+    select: { id: true },
+  });
+  if (overflow.length > 0) {
+    await prisma.storageAuditLog.deleteMany({
+      where: { id: { in: overflow.map((r) => r.id) } },
+    });
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -361,13 +402,15 @@ function evaluateAlertLevel(
   return "healthy";
 }
 
-export function checkStorageQuota(options?: {
+export async function checkStorageQuota(options?: {
   provider?: "cloudinary" | "supabase";
   incomingSizeBytes?: number;
-}): StorageQuotaReport {
+}): Promise<StorageQuotaReport> {
   const env = getServerEnv();
-  const store = getRuntimeStore();
-  const activeFiles = store.storedFiles.filter((f) => !f.deletedAt);
+  const activeFiles = await prisma.storedFile.findMany({
+    where: { deletedAt: null },
+    select: { provider: true, fileSize: true, fileType: true },
+  });
 
   const cloudinaryFiles = activeFiles.filter((f) => f.provider === "cloudinary");
   const supabaseFiles = activeFiles.filter((f) => f.provider === "supabase");
@@ -474,7 +517,6 @@ export const uploadImageSchema = z.object({
   sizeBytes: z.number().int().positive(),
   category: z
     .enum([
-      "student_avatar",
       "teacher_avatar",
       "project",
       "podcast_thumbnail",
@@ -489,6 +531,8 @@ export const uploadImageSchema = z.object({
   maxSizeMbOverride: z.number().positive().max(25).optional(),
   referencedBy: z.array(z.string()).default([]),
   simulateMetadataFailure: z.boolean().optional(),
+  existingPublicId: objectKeySchema.optional(),
+  existingPublicUrl: optionalSafeUrlSchema.transform((v) => v ?? undefined),
 });
 
 export type UploadImageInput = z.input<typeof uploadImageSchema> & {
@@ -529,13 +573,15 @@ export async function uploadImage(input: UploadImageInput): Promise<StoredFileRe
     );
   }
 
-  checkStorageQuota({
+  await checkStorageQuota({
     provider: "cloudinary",
     incomingSizeBytes: data.sizeBytes,
   });
 
   const cloudinaryFolder = CLOUDINARY_FOLDER_MAP[data.category as ImageCategory];
-  const publicId = buildObjectKey(cloudinaryFolder, data.fileName, new Date(), false);
+  const publicId =
+    data.existingPublicId ??
+    buildObjectKey(cloudinaryFolder, data.fileName, new Date(), false);
   const provider = getStorageProvider(providerName);
 
   const uploaded = await provider.upload({
@@ -550,46 +596,48 @@ export async function uploadImage(input: UploadImageInput): Promise<StoredFileRe
   });
 
   try {
-    if (data.simulateMetadataFailure) {
+    const isTestEnv = process.env.NODE_ENV === "test" || process.env.APP_IS_TEST === "true";
+    if (data.simulateMetadataFailure && isTestEnv) {
       throw new Error("Simulated PostgreSQL metadata save failure");
     }
 
-    const nowIso = new Date().toISOString();
-    const record: StoredFileRecord = {
-      id: `sf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      originalName: data.fileName,
-      storedName: uploaded.storagePath.split("/").pop() ?? data.fileName,
-      provider: providerName,
-      fileType: "IMAGE",
-      mimeType: data.mimeType,
-      fileSize: data.sizeBytes,
-      bucketName: null,
-      storagePath: uploaded.storagePath,
-      cloudinaryPublicId: uploaded.cloudinaryPublicId ?? publicId,
-      publicUrl: uploaded.publicUrl,
-      isPublic: true,
-      ownerId: data.actorId,
-      category: data.category,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-      deletedAt: null,
-      referencedBy: data.referencedBy,
-    };
+    const sfId = `sf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const resolvedPath = uploaded.storagePath;
+    const resolvedCloudinaryId =
+      data.existingPublicId ?? uploaded.cloudinaryPublicId ?? publicId;
+    const resolvedPublicUrl = data.existingPublicUrl ?? uploaded.publicUrl;
 
-    const store = getRuntimeStore();
-    store.storedFiles.unshift(record);
+    const created = await prisma.storedFile.create({
+      data: {
+        id: sfId,
+        originalName: data.fileName,
+        storedName: resolvedPath.split("/").pop() ?? data.fileName,
+        provider: providerName,
+        fileType: "IMAGE",
+        mimeType: data.mimeType,
+        fileSize: data.sizeBytes,
+        bucketName: null,
+        storagePath: resolvedPath,
+        cloudinaryPublicId: resolvedCloudinaryId,
+        publicUrl: resolvedPublicUrl,
+        isPublic: true,
+        ownerId: data.actorId,
+        category: data.category,
+        referencedBy: data.referencedBy,
+      },
+    });
 
-    recordAuditLog({
+    await recordAuditLog({
       action: "UPLOAD_IMAGE",
       provider: providerName,
       actorId: data.actorId,
-      targetId: record.id,
-      targetPath: record.storagePath ?? publicId,
+      targetId: created.id,
+      targetPath: created.storagePath ?? publicId,
       status: "SUCCESS",
       detail: `Đã tải ảnh "${data.fileName}" (${formatBytesLabel(data.sizeBytes)}) vào ${cloudinaryFolder}`,
     });
 
-    return record;
+    return mapPrismaStoredFile(created);
   } catch (err) {
     // Rollback uploaded file on Cloudinary if metadata save fails (PHẦN 11)
     try {
@@ -598,26 +646,34 @@ export async function uploadImage(input: UploadImageInput): Promise<StoredFileRe
         cloudinaryPublicId: uploaded.cloudinaryPublicId ?? publicId,
         visibility: "public",
       });
-      recordAuditLog({
-        action: "ROLLBACK_ORPHAN",
-        provider: providerName,
-        actorId: data.actorId,
-        targetId: publicId,
-        targetPath: uploaded.storagePath,
-        status: "ROLLED_BACK",
-        detail: "Đã rollback xóa ảnh trên Cloudinary do lưu metadata thất bại",
-      });
+      try {
+        await recordAuditLog({
+          action: "ROLLBACK_ORPHAN",
+          provider: providerName,
+          actorId: data.actorId,
+          targetId: publicId,
+          targetPath: uploaded.storagePath,
+          status: "ROLLED_BACK",
+          detail: "Đã rollback xóa ảnh trên Cloudinary do lưu metadata thất bại",
+        });
+      } catch {
+        // best-effort audit logging during rollback
+      }
     } catch {
-      const orphan: OrphanedStorageObject = {
-        id: `orphan-${Date.now()}`,
-        provider: providerName,
-        bucketName: null,
-        storagePath: uploaded.storagePath,
-        cloudinaryPublicId: uploaded.cloudinaryPublicId ?? publicId,
-        reason: "Lưu metadata thất bại và rollback Cloudinary không thành công",
-        createdAt: new Date().toISOString(),
-      };
-      getRuntimeStore().orphanFiles.unshift(orphan);
+      try {
+        await prisma.orphanedStorageFile.create({
+          data: {
+            id: `orphan-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            provider: providerName,
+            bucketName: null,
+            storagePath: uploaded.storagePath,
+            cloudinaryPublicId: uploaded.cloudinaryPublicId ?? publicId,
+            reason: "Lưu metadata thất bại và rollback Cloudinary không thành công",
+          },
+        });
+      } catch {
+        // best-effort orphan recording
+      }
     }
     throw err;
   }
@@ -633,6 +689,7 @@ export const uploadPodcastSchema = z.object({
   provider: z.enum(["cloudinary", "supabase", "r2", "s3", "local"]).optional(),
   referencedBy: z.array(z.string()).default([]),
   simulateMetadataFailure: z.boolean().optional(),
+  existingStoragePath: objectKeySchema.optional(),
 });
 
 export type UploadPodcastInput = z.input<typeof uploadPodcastSchema> & {
@@ -672,7 +729,7 @@ export async function uploadPodcast(input: UploadPodcastInput): Promise<StoredFi
     );
   }
 
-  checkStorageQuota({
+  await checkStorageQuota({
     provider: "supabase",
     incomingSizeBytes: data.sizeBytes,
   });
@@ -682,7 +739,8 @@ export async function uploadPodcast(input: UploadPodcastInput): Promise<StoredFi
       ? env.SUPABASE_PUBLIC_BUCKET
       : env.SUPABASE_PRIVATE_BUCKET;
   const folderPrefix = data.visibility === "public" ? "podcasts" : "teacher-resources";
-  const storagePath = buildObjectKey(folderPrefix, data.fileName);
+  const storagePath =
+    data.existingStoragePath ?? buildObjectKey(folderPrefix, data.fileName);
   const provider = getStorageProvider(providerName);
 
   const uploaded = await provider.upload({
@@ -696,46 +754,44 @@ export async function uploadPodcast(input: UploadPodcastInput): Promise<StoredFi
   });
 
   try {
-    if (data.simulateMetadataFailure) {
+    const isTestEnv = process.env.NODE_ENV === "test" || process.env.APP_IS_TEST === "true";
+    if (data.simulateMetadataFailure && isTestEnv) {
       throw new Error("Simulated PostgreSQL metadata save failure");
     }
 
-    const nowIso = new Date().toISOString();
-    const record: StoredFileRecord = {
-      id: `sf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      originalName: data.fileName,
-      storedName: storagePath.split("/").pop() ?? data.fileName,
-      provider: providerName,
-      fileType: "AUDIO",
-      mimeType: data.mimeType,
-      fileSize: data.sizeBytes,
-      bucketName: bucket,
-      storagePath: uploaded.storagePath,
-      cloudinaryPublicId: null,
-      // Never persist temporary signed URLs in database metadata
-      publicUrl: data.visibility === "public" ? uploaded.publicUrl : null,
-      isPublic: data.visibility === "public",
-      ownerId: data.actorId,
-      category: folderPrefix,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-      deletedAt: null,
-      referencedBy: data.referencedBy,
-    };
+    const sfId = `sf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const created = await prisma.storedFile.create({
+      data: {
+        id: sfId,
+        originalName: data.fileName,
+        storedName: storagePath.split("/").pop() ?? data.fileName,
+        provider: providerName,
+        fileType: "AUDIO",
+        mimeType: data.mimeType,
+        fileSize: data.sizeBytes,
+        bucketName: bucket,
+        storagePath: uploaded.storagePath,
+        cloudinaryPublicId: null,
+        // Never persist temporary signed URLs in database metadata
+        publicUrl: data.visibility === "public" ? uploaded.publicUrl : null,
+        isPublic: data.visibility === "public",
+        ownerId: data.actorId,
+        category: folderPrefix,
+        referencedBy: data.referencedBy,
+      },
+    });
 
-    getRuntimeStore().storedFiles.unshift(record);
-
-    recordAuditLog({
+    await recordAuditLog({
       action: "UPLOAD_PODCAST",
       provider: providerName,
       actorId: data.actorId,
-      targetId: record.id,
+      targetId: created.id,
       targetPath: `${bucket}/${uploaded.storagePath}`,
       status: "SUCCESS",
       detail: `Đã tải podcast "${data.fileName}" (${formatBytesLabel(data.sizeBytes)}) vào bucket ${bucket}`,
     });
 
-    return record;
+    return mapPrismaStoredFile(created);
   } catch (err) {
     try {
       await provider.delete({
@@ -743,16 +799,34 @@ export async function uploadPodcast(input: UploadPodcastInput): Promise<StoredFi
         storagePath: uploaded.storagePath,
         visibility: data.visibility,
       });
+      try {
+        await recordAuditLog({
+          action: "ROLLBACK_ORPHAN",
+          provider: providerName,
+          actorId: data.actorId,
+          targetId: uploaded.storagePath,
+          targetPath: `${bucket}/${uploaded.storagePath}`,
+          status: "ROLLED_BACK",
+          detail: "Đã rollback xóa podcast trên Supabase do lưu metadata thất bại",
+        });
+      } catch {
+        // best-effort audit logging during rollback
+      }
     } catch {
-      getRuntimeStore().orphanFiles.unshift({
-        id: `orphan-${Date.now()}`,
-        provider: providerName,
-        bucketName: bucket,
-        storagePath: uploaded.storagePath,
-        cloudinaryPublicId: null,
-        reason: "Lưu metadata podcast thất bại và rollback Supabase không thành công",
-        createdAt: new Date().toISOString(),
-      });
+      try {
+        await prisma.orphanedStorageFile.create({
+          data: {
+            id: `orphan-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            provider: providerName,
+            bucketName: bucket,
+            storagePath: uploaded.storagePath,
+            cloudinaryPublicId: null,
+            reason: "Lưu metadata podcast thất bại và rollback Supabase không thành công",
+          },
+        });
+      } catch {
+        // best-effort orphan recording
+      }
     }
     throw err;
   }
@@ -786,6 +860,7 @@ export const uploadPdfSchema = z.object({
   provider: z.enum(["cloudinary", "supabase", "r2", "s3", "local"]).optional(),
   referencedBy: z.array(z.string()).default([]),
   simulateMetadataFailure: z.boolean().optional(),
+  existingStoragePath: objectKeySchema.optional(),
 });
 
 export type UploadPdfInput = z.input<typeof uploadPdfSchema> & {
@@ -864,7 +939,7 @@ export async function uploadPdf(input: UploadPdfInput): Promise<StoredFileRecord
     );
   }
 
-  checkStorageQuota({
+  await checkStorageQuota({
     provider: "supabase",
     incomingSizeBytes: data.sizeBytes,
   });
@@ -873,7 +948,8 @@ export async function uploadPdf(input: UploadPdfInput): Promise<StoredFileRecord
     data.visibility === "public"
       ? env.SUPABASE_PUBLIC_BUCKET
       : env.SUPABASE_PRIVATE_BUCKET;
-  const storagePath = buildObjectKey(resolvedCategory, data.fileName);
+  const storagePath =
+    data.existingStoragePath ?? buildObjectKey(resolvedCategory, data.fileName);
   const provider = getStorageProvider(providerName);
 
   const uploaded = await provider.upload({
@@ -887,47 +963,352 @@ export async function uploadPdf(input: UploadPdfInput): Promise<StoredFileRecord
   });
 
   try {
-    if (data.simulateMetadataFailure) {
+    const isTestEnv = process.env.NODE_ENV === "test" || process.env.APP_IS_TEST === "true";
+    if (data.simulateMetadataFailure && isTestEnv) {
       throw new Error("Simulated PostgreSQL metadata save failure");
     }
 
-    const nowIso = new Date().toISOString();
-    const record: StoredFileRecord = {
-      id: `sf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      originalName: data.fileName,
-      storedName: storagePath.split("/").pop() ?? data.fileName,
-      provider: providerName,
-      fileType: "PDF",
-      mimeType: data.mimeType,
-      fileSize: data.sizeBytes,
-      bucketName: bucket,
-      storagePath: uploaded.storagePath,
-      cloudinaryPublicId: null,
-      // Strictly null for private PDFs — signed URLs are generated on demand only
-      publicUrl: data.visibility === "public" ? uploaded.publicUrl : null,
-      isPublic: data.visibility === "public",
-      ownerId: data.actorId,
-      category: resolvedCategory,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-      deletedAt: null,
-      referencedBy: data.referencedBy,
-    };
+    const sfId = `sf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const created = await prisma.storedFile.create({
+      data: {
+        id: sfId,
+        originalName: data.fileName,
+        storedName: storagePath.split("/").pop() ?? data.fileName,
+        provider: providerName,
+        fileType: "PDF",
+        mimeType: data.mimeType,
+        fileSize: data.sizeBytes,
+        bucketName: bucket,
+        storagePath: uploaded.storagePath,
+        cloudinaryPublicId: null,
+        // Strictly null for private PDFs — signed URLs are generated on demand only
+        publicUrl: data.visibility === "public" ? uploaded.publicUrl : null,
+        isPublic: data.visibility === "public",
+        ownerId: data.actorId,
+        category: resolvedCategory,
+        referencedBy: data.referencedBy,
+      },
+    });
 
-    const store = getRuntimeStore();
-    store.storedFiles.unshift(record);
-
-    recordAuditLog({
+    await recordAuditLog({
       action: "UPLOAD_PDF",
       provider: providerName,
       actorId: data.actorId,
-      targetId: record.id,
+      targetId: created.id,
       targetPath: `${bucket}/${uploaded.storagePath}`,
       status: "SUCCESS",
       detail: `Đã tải PDF "${data.fileName}" (${formatBytesLabel(data.sizeBytes)}) vào ${bucket}/${resolvedCategory}`,
     });
 
-    return record;
+    return mapPrismaStoredFile(created);
+  } catch (err) {
+    try {
+      await provider.delete({
+        bucket,
+        storagePath: uploaded.storagePath,
+        visibility: data.visibility,
+      });
+      try {
+        await recordAuditLog({
+          action: "ROLLBACK_ORPHAN",
+          provider: providerName,
+          actorId: data.actorId,
+          targetId: uploaded.storagePath,
+          targetPath: `${bucket}/${uploaded.storagePath}`,
+          status: "ROLLED_BACK",
+          detail: "Đã rollback xóa PDF trên Supabase do lưu metadata thất bại",
+        });
+      } catch {
+        // best-effort audit logging during rollback
+      }
+    } catch {
+      try {
+        await prisma.orphanedStorageFile.create({
+          data: {
+            id: `orphan-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            provider: providerName,
+            bucketName: bucket,
+            storagePath: uploaded.storagePath,
+            cloudinaryPublicId: null,
+            reason: "Lưu metadata PDF thất bại và rollback Supabase không thành công",
+          },
+        });
+      } catch {
+        // best-effort orphan recording
+      }
+    }
+    throw err;
+  }
+}
+
+// -----------------------------------------------------------------------------
+//  CURRICULUM ATTACHMENT UPLOAD (MAGIC-BYTE VERIFIED & UUID STORED)
+// -----------------------------------------------------------------------------
+
+function detectCurriculumAttachmentType(
+  fileName: string,
+  mimeType: string,
+): CurriculumAttachment["type"] {
+  const { extension } = slugifyFileName(fileName);
+  const mime = mimeType.toLowerCase();
+  if (extension === "pdf" || mime.includes("pdf")) return "PDF";
+  if (
+    ["doc", "docx"].includes(extension) ||
+    mime.includes("word") ||
+    mime.includes("wordprocessingml")
+  ) {
+    return "DOCX";
+  }
+  if (
+    ["ppt", "pptx"].includes(extension) ||
+    mime.includes("presentation") ||
+    mime.includes("powerpoint")
+  ) {
+    return "SLIDE";
+  }
+  if (
+    ["xls", "xlsx"].includes(extension) ||
+    mime.includes("spreadsheet") ||
+    mime.includes("excel")
+  ) {
+    return "WORKSHEET";
+  }
+  if (
+    ["jpg", "jpeg", "png", "webp"].includes(extension) ||
+    mime.startsWith("image/")
+  ) {
+    return "IMAGE";
+  }
+  if (
+    ["mp3", "m4a"].includes(extension) ||
+    mime.startsWith("audio/")
+  ) {
+    return "AUDIO";
+  }
+  throw new ValidationError(
+    `Định dạng tệp "${fileName}" (.${extension}) không được hỗ trợ cho tài liệu lớp học.`,
+  );
+}
+
+function verifyCurriculumFileMagicBytes(
+  bytes: Uint8Array | Buffer | undefined,
+  fileType: CurriculumAttachment["type"],
+): void {
+  if (!bytes) return;
+  if (bytes.length < 4) {
+    throw new ValidationError(
+      "Tệp tải lên quá nhỏ hoặc rỗng, không thể xác thực chữ ký tệp (magic bytes).",
+    );
+  }
+  // Always reject PE/MZ and ELF executables regardless of claimed extension
+  if (bytes[0] === 0x4d && bytes[1] === 0x5a) {
+    throw new ValidationError("Phát hiện chữ ký tệp thực thi (PE/MZ) bị cấm tải lên");
+  }
+  if (
+    bytes[0] === 0x7f &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0x4c &&
+    bytes[3] === 0x46
+  ) {
+    throw new ValidationError("Phát hiện chữ ký tệp thực thi (ELF) bị cấm tải lên");
+  }
+
+  if (fileType === "PDF") {
+    verifyFileMagicBytes(bytes, "pdf");
+    return;
+  }
+  if (fileType === "IMAGE") {
+    verifyFileMagicBytes(bytes, "image");
+    return;
+  }
+  if (fileType === "AUDIO") {
+    verifyFileMagicBytes(bytes, "audio");
+    return;
+  }
+
+  // DOCX / SLIDE (pptx) / WORKSHEET (xlsx): OOXML ZIP (PK\x03\x04) or legacy OLE2 (D0 CF 11 E0)
+  const isOoxmlZip =
+    bytes[0] === 0x50 &&
+    bytes[1] === 0x4b &&
+    bytes[2] === 0x03 &&
+    bytes[3] === 0x04;
+  const isOle2 =
+    bytes[0] === 0xd0 &&
+    bytes[1] === 0xcf &&
+    bytes[2] === 0x11 &&
+    bytes[3] === 0xe0;
+  if (!isOoxmlZip && !isOle2) {
+    throw new ValidationError(
+      `Nội dung nhị phân thực tế không khớp định dạng tài liệu Office (${fileType}).`,
+    );
+  }
+}
+
+export const uploadCurriculumAttachmentSchema = z.object({
+  fileName: z.string().trim().min(1).max(255),
+  mimeType: z.string().trim().max(128).default("application/octet-stream"),
+  sizeBytes: z.number().int().positive(),
+  classId: idSchema,
+  classCode: z.string().trim().max(32).optional(),
+  weekNumber: z.coerce.number().int().min(1).max(100),
+  visibility: z.enum(["public", "private"]).default("private"),
+  actorId: z.string().trim().min(1).default("admin"),
+  actorRole: z.enum(["admin", "student"]).default("admin"),
+  provider: z.enum(["cloudinary", "supabase", "r2", "s3", "local"]).optional(),
+});
+
+export type UploadCurriculumAttachmentInput = z.input<
+  typeof uploadCurriculumAttachmentSchema
+> & {
+  fileBuffer?: Uint8Array | Buffer;
+};
+
+export async function uploadCurriculumAttachment(
+  input: UploadCurriculumAttachmentInput,
+): Promise<{ storedFile: StoredFileRecord; attachment: CurriculumAttachment }> {
+  const data = validate(uploadCurriculumAttachmentSchema, input);
+  if (data.actorRole !== "admin") {
+    throw new ForbiddenError("Chỉ giáo viên/admin mới có quyền tải tài liệu lớp học.");
+  }
+
+  checkUploadRateLimit(data.actorId);
+  const fileType = detectCurriculumAttachmentType(data.fileName, data.mimeType);
+  verifyCurriculumFileMagicBytes(input.fileBuffer, fileType);
+
+  const env = getServerEnv();
+  if (data.sizeBytes > env.MAX_PDF_SIZE_MB * MB) {
+    throw new ValidationError(
+      `Tệp vượt quá giới hạn dung lượng cho phép (${env.MAX_PDF_SIZE_MB} MB).`,
+    );
+  }
+
+  const providerName = resolveProviderForMedia("pdf", data.provider);
+  await checkStorageQuota({
+    provider: providerName === "cloudinary" ? "cloudinary" : "supabase",
+    incomingSizeBytes: data.sizeBytes,
+  });
+
+  const bucket =
+    data.visibility === "public"
+      ? env.SUPABASE_PUBLIC_BUCKET
+      : env.SUPABASE_PRIVATE_BUCKET;
+  const folderPrefix =
+    data.visibility === "public" ? "resources/exercises" : "student-documents";
+  const storagePath = buildObjectKey(folderPrefix, data.fileName);
+  const provider = getStorageProvider(providerName);
+
+  const uploaded = await provider.upload({
+    bucket,
+    storagePath,
+    contentType: data.mimeType || "application/octet-stream",
+    sizeBytes: data.sizeBytes,
+    visibility: data.visibility,
+    body: input.fileBuffer,
+    allowOverwrite: false,
+  });
+
+  const d = new Date();
+  const dateDisplay = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+  const storedId = `sf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const storedName = storagePath.split("/").pop() ?? data.fileName;
+  const normalizedMime = data.mimeType || "application/octet-stream";
+  const mappedStoredType: StoredFileRecord["fileType"] =
+    fileType === "IMAGE"
+      ? "IMAGE"
+      : fileType === "AUDIO"
+        ? "AUDIO"
+        : fileType === "SLIDE"
+          ? "SLIDE"
+          : fileType === "WORKSHEET"
+            ? "WORKSHEET"
+            : "PDF";
+  const resolvedPublicUrl = data.visibility === "public" ? uploaded.publicUrl : null;
+  const isPublic = data.visibility === "public";
+
+  let record: StoredFileRecord;
+  try {
+    const createdStored = await prisma.$transaction(async (tx) => {
+      const sfRow = await tx.storedFile.create({
+        data: {
+          id: storedId,
+          originalName: data.fileName,
+          storedName,
+          provider: providerName,
+          fileType: mappedStoredType,
+          mimeType: normalizedMime,
+          fileSize: data.sizeBytes,
+          bucketName: bucket,
+          storagePath: uploaded.storagePath,
+          cloudinaryPublicId: null,
+          publicUrl: resolvedPublicUrl,
+          isPublic,
+          ownerId: data.actorId,
+          category: folderPrefix,
+          referencedBy: [`classroom:${data.classId}:week:${data.weekNumber}`],
+        },
+      });
+
+      let targetFolder = await tx.resourceFolder.findFirst({
+        orderBy: [{ id: "asc" }],
+      });
+      if (!targetFolder) {
+        targetFolder = await tx.resourceFolder.create({
+          data: {
+            id: "fld-writing",
+            name: "01. Academic Writing & Essays",
+            description: "Thư mục học liệu số mặc định",
+            parentId: null,
+            itemCount: 0,
+            updatedAt: dateDisplay,
+            visibility: "public",
+          },
+        });
+      }
+
+      await tx.resourceFile.create({
+        data: {
+          id: storedId,
+          folderId: targetFolder.id,
+          folderName: targetFolder.name,
+          title: data.fileName,
+          description: `Tài liệu Tuần ${data.weekNumber} · Lớp ${data.classCode || data.classId}`,
+          fileType: mappedStoredType,
+          provider: providerName,
+          mimeType: normalizedMime,
+          bucketName: bucket,
+          storagePath: uploaded.storagePath,
+          cloudinaryPublicId: null,
+          publicUrl: resolvedPublicUrl,
+          objectKey: uploaded.storagePath,
+          size: formatBytesLabel(data.sizeBytes),
+          sizeBytes: data.sizeBytes,
+          updatedAt: dateDisplay,
+          downloads: 0,
+          pagesOrDuration: "Tài liệu lớp",
+          level: data.classCode || "IELTS",
+          visibility: data.visibility,
+          category: folderPrefix,
+          ownerId: data.actorId,
+          originalName: data.fileName,
+          storedName,
+          previewSummary: [
+            `Gắn trực tiếp vào Tuần ${data.weekNumber} (${data.classCode || data.classId})`,
+            data.visibility === "private"
+              ? "Bảo mật qua Private Bucket & Signed URL cho học viên trong lớp."
+              : "Tệp công khai.",
+          ],
+        },
+      });
+
+      await tx.resourceFolder.update({
+        where: { id: targetFolder.id },
+        data: { itemCount: { increment: 1 } },
+      });
+
+      return sfRow;
+    });
+
+    record = mapPrismaStoredFile(createdStored);
   } catch (err) {
     try {
       await provider.delete({
@@ -936,18 +1317,53 @@ export async function uploadPdf(input: UploadPdfInput): Promise<StoredFileRecord
         visibility: data.visibility,
       });
     } catch {
-      getRuntimeStore().orphanFiles.unshift({
-        id: `orphan-${Date.now()}`,
-        provider: providerName,
-        bucketName: bucket,
-        storagePath: uploaded.storagePath,
-        cloudinaryPublicId: null,
-        reason: "Lưu metadata PDF thất bại và rollback Supabase không thành công",
-        createdAt: new Date().toISOString(),
-      });
+      try {
+        await prisma.orphanedStorageFile.create({
+          data: {
+            id: `orphan-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            provider: providerName,
+            bucketName: bucket,
+            storagePath: uploaded.storagePath,
+            cloudinaryPublicId: null,
+            reason: "Lưu metadata tài liệu tuần học thất bại và rollback không thành công",
+          },
+        });
+      } catch {
+        // best-effort orphan recording
+      }
     }
     throw err;
   }
+
+  await recordAuditLog({
+    action: "UPLOAD_PDF",
+    provider: providerName,
+    actorId: data.actorId,
+    targetId: record.id,
+    targetPath: `${bucket}/${uploaded.storagePath}`,
+    status: "SUCCESS",
+    detail: `Đã tải tài liệu tuần ${data.weekNumber} (${fileType}): "${data.fileName}" (${formatBytesLabel(data.sizeBytes)})`,
+  });
+
+  const attachment: CurriculumAttachment = {
+    id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    name: data.fileName,
+    url:
+      data.visibility === "public" && record.publicUrl
+        ? record.publicUrl
+        : `/api/admin/storage/download-url?fileId=${record.id}`,
+    size: formatBytesLabel(data.sizeBytes),
+    sizeBytes: data.sizeBytes,
+    type: fileType,
+    uploadedAt: dateDisplay,
+    storedFileId: record.id,
+    visibility: data.visibility,
+    classId: data.classId,
+    classCode: data.classCode,
+    weekNumber: data.weekNumber,
+  };
+
+  return { storedFile: record, attachment };
 }
 
 // -----------------------------------------------------------------------------
@@ -966,13 +1382,13 @@ export function getOptimizedImageUrl(
   return buildCloudinaryUrl(env.CLOUDINARY_CLOUD_NAME, safeId, preset);
 }
 
-export function getFileUrl(
+export async function getFileUrl(
   fileIdOrRecord: string | StoredFileRecord,
   options?: { preset?: CloudinaryTransformPreset },
-): string {
+): Promise<string> {
   const record =
     typeof fileIdOrRecord === "string"
-      ? getFileMetadata(fileIdOrRecord)
+      ? await getFileMetadata(fileIdOrRecord)
       : fileIdOrRecord;
 
   if (!record.isPublic) {
@@ -1009,6 +1425,7 @@ export interface SignedFileUrlRequest {
   actorRole?: Role | null;
   downloadName?: string;
   expiresInSeconds?: number;
+  skipAuditLog?: boolean;
 }
 
 export async function getSignedFileUrl(
@@ -1018,19 +1435,25 @@ export async function getSignedFileUrl(
     throw new UnauthorizedError("Yêu cầu đăng nhập trước khi truy cập tệp riêng tư");
   }
 
-  const store = getRuntimeStore();
   let record: StoredFileRecord | undefined;
 
   if (input.fileId) {
-    record = store.storedFiles.find((f) => f.id === input.fileId && !f.deletedAt);
-    if (!record) throw new NotFoundError("StoredFile", input.fileId);
+    const found = await prisma.storedFile.findFirst({
+      where: { id: input.fileId, deletedAt: null },
+    });
+    if (!found) throw new NotFoundError("StoredFile", input.fileId);
+    record = mapPrismaStoredFile(found);
   } else if (input.key) {
     const safeKey = validate(objectKeySchema, input.key);
-    record = store.storedFiles.find(
-      (f) =>
-        !f.deletedAt &&
-        (f.storagePath === safeKey || f.cloudinaryPublicId === safeKey),
-    );
+    const found = await prisma.storedFile.findFirst({
+      where: {
+        deletedAt: null,
+        OR: [{ storagePath: safeKey }, { cloudinaryPublicId: safeKey }],
+      },
+    });
+    if (found) {
+      record = mapPrismaStoredFile(found);
+    }
   } else {
     throw new ValidationError("Phải cung cấp fileId hoặc key để tạo Signed URL");
   }
@@ -1038,7 +1461,7 @@ export async function getSignedFileUrl(
   const category = record?.category ?? "internal-documents";
   const storagePath = record?.storagePath ?? validate(objectKeySchema, input.key);
 
-  // Strict authorization: students can only access public files or `student-documents`
+  // Strict authorization: students can only access public files or `student-documents` they are enrolled in
   if (input.actorRole !== "admin") {
     const isAllowedStudentCategory =
       record?.isPublic === true ||
@@ -1049,11 +1472,38 @@ export async function getSignedFileUrl(
         "Bạn không có quyền truy cập tài liệu nội bộ hoặc đề thi/đáp án riêng tư của giáo viên",
       );
     }
+    if (record && !record.isPublic && record.referencedBy.some((r) => r.startsWith("classroom:"))) {
+      const allowedClasses = record.referencedBy
+        .filter((r) => r.startsWith("classroom:"))
+        .map((r) => r.split(":")[1]);
+      const student = await prisma.student.findFirst({
+        where: {
+          status: { not: "archived" },
+          deletedAt: null,
+          OR: [
+            { id: input.actorId },
+            { code: { equals: input.actorId, mode: "insensitive" } },
+          ],
+        },
+        select: { classroomId: true },
+      });
+      if (student && !allowedClasses.includes(student.classroomId)) {
+        throw new ForbiddenError(
+          "Tài liệu này thuộc về lớp học khác, bạn không có quyền truy cập.",
+        );
+      }
+    }
   }
 
   const env = getServerEnv();
+  const setting = await prisma.teacherSetting.findUnique({
+    where: { id: "default" },
+    select: { presignedExpirySeconds: true },
+  });
+  const configuredTtl =
+    setting?.presignedExpirySeconds ?? env.PRIVATE_FILE_URL_TTL_SECONDS;
   const expiresInSeconds = Math.min(
-    Math.max(input.expiresInSeconds ?? env.PRIVATE_FILE_URL_TTL_SECONDS, 60),
+    Math.max(input.expiresInSeconds ?? configuredTtl, 60),
     3600,
   );
 
@@ -1073,15 +1523,17 @@ export async function getSignedFileUrl(
   );
 
   // Audit log NEVER records the signed URL or token (PHẦN 8.13)
-  recordAuditLog({
-    action: "CREATE_SIGNED_URL",
-    provider: providerName,
-    actorId: input.actorId,
-    targetId: record?.id ?? storagePath,
-    targetPath: storagePath,
-    status: "SUCCESS",
-    detail: `Đã cấp Signed URL tạm thời (${expiresInSeconds}s) cho ${input.actorRole}:${input.actorId}`,
-  });
+  if (!input.skipAuditLog) {
+    await recordAuditLog({
+      action: "CREATE_SIGNED_URL",
+      provider: providerName,
+      actorId: input.actorId,
+      targetId: record?.id ?? storagePath,
+      targetPath: storagePath,
+      status: "SUCCESS",
+      detail: `Đã cấp Signed URL tạm thời (${expiresInSeconds}s) cho ${input.actorRole}:${input.actorId}`,
+    });
+  }
 
   return { url, expiresInSeconds };
 }
@@ -1090,29 +1542,39 @@ export async function getSignedFileUrl(
 //  METADATA LOOKUP, DELETE & REPLACE (PHẦN 3.5, 4.6, 5, 11)
 // -----------------------------------------------------------------------------
 
-export function getFileMetadata(id: unknown): StoredFileRecord {
+export async function findStoredFileById(
+  id: unknown,
+): Promise<StoredFileRecord | null> {
   const validId = validate(idSchema, id);
-  const found = getRuntimeStore().storedFiles.find(
-    (f) => f.id === validId && !f.deletedAt,
-  );
+  const found = await prisma.storedFile.findFirst({
+    where: { id: validId, deletedAt: null },
+  });
+  return found ? mapPrismaStoredFile(found) : null;
+}
+
+export async function getFileMetadata(id: unknown): Promise<StoredFileRecord> {
+  const validId = validate(idSchema, id);
+  const found = await findStoredFileById(validId);
   if (!found) throw new NotFoundError("StoredFile", validId);
   return found;
 }
 
-export function findImageByPublicId(publicId: unknown): StoredFileRecord | null {
+export async function findImageByPublicId(
+  publicId: unknown,
+): Promise<StoredFileRecord | null> {
   const safeId = validate(objectKeySchema, publicId);
-  return (
-    getRuntimeStore().storedFiles.find(
-      (f) =>
-        !f.deletedAt &&
-        f.provider === "cloudinary" &&
-        (f.cloudinaryPublicId === safeId || f.storagePath === safeId),
-    ) ?? null
-  );
+  const found = await prisma.storedFile.findFirst({
+    where: {
+      deletedAt: null,
+      provider: "cloudinary",
+      OR: [{ cloudinaryPublicId: safeId }, { storagePath: safeId }],
+    },
+  });
+  return found ? mapPrismaStoredFile(found) : null;
 }
 
 export async function checkImageExists(publicId: unknown): Promise<boolean> {
-  const found = findImageByPublicId(publicId);
+  const found = await findImageByPublicId(publicId);
   if (found) return true;
   const safeId = validate(objectKeySchema, publicId);
   return getStorageProvider("cloudinary").exists({
@@ -1134,7 +1596,7 @@ export async function deleteFile(input: DeleteFileInput): Promise<StoredFileReco
     throw new ForbiddenError("Chỉ quản trị viên mới có quyền xóa tệp khỏi hệ thống");
   }
 
-  const record = getFileMetadata(input.id);
+  const record = await getFileMetadata(input.id);
 
   if (record.referencedBy.length > 0 && !input.forceReplace) {
     throw new ConflictError(
@@ -1152,28 +1614,49 @@ export async function deleteFile(input: DeleteFileInput): Promise<StoredFileReco
     visibility: record.isPublic ? "public" : "private",
   });
 
-  const nowIso = new Date().toISOString();
-  record.deletedAt = nowIso;
-  record.updatedAt = nowIso;
-  record.publicUrl = null;
+  const now = new Date();
+  const updatedRow = await prisma.$transaction(async (tx) => {
+    const updatedStored = await tx.storedFile.update({
+      where: { id: record.id },
+      data: {
+        deletedAt: now,
+        publicUrl: null,
+      },
+    });
 
-  // Also remove any linked ResourceFileItem in runtime store so UI never shows stale URLs
-  const store = getRuntimeStore();
-  const resIdx = store.files.findIndex(
-    (f) =>
-      f.id === record.id ||
-      (record.storagePath && f.objectKey === record.storagePath) ||
-      (record.cloudinaryPublicId && f.cloudinaryPublicId === record.cloudinaryPublicId),
-  );
-  if (resIdx !== -1) {
-    const [removed] = store.files.splice(resIdx, 1);
-    const folder = store.folders.find((fld) => fld.id === removed.folderId);
-    if (folder && folder.itemCount > 0) {
-      folder.itemCount -= 1;
+    const orClauses: Array<{
+      id?: string;
+      objectKey?: string;
+      cloudinaryPublicId?: string;
+    }> = [{ id: record.id }];
+    if (record.storagePath) {
+      orClauses.push({ objectKey: record.storagePath });
     }
-  }
+    if (record.cloudinaryPublicId) {
+      orClauses.push({ cloudinaryPublicId: record.cloudinaryPublicId });
+    }
 
-  recordAuditLog({
+    const linkedRes = await tx.resourceFile.findFirst({
+      where: { OR: orClauses },
+    });
+    if (linkedRes) {
+      await tx.resourceFile.delete({ where: { id: linkedRes.id } });
+      const folder = await tx.resourceFolder.findUnique({
+        where: { id: linkedRes.folderId },
+        select: { itemCount: true },
+      });
+      if (folder && folder.itemCount > 0) {
+        await tx.resourceFolder.update({
+          where: { id: linkedRes.folderId },
+          data: { itemCount: Math.max(0, folder.itemCount - 1) },
+        });
+      }
+    }
+
+    return updatedStored;
+  });
+
+  await recordAuditLog({
     action: "DELETE_FILE",
     provider: record.provider,
     actorId: input.actorId ?? "admin",
@@ -1183,16 +1666,35 @@ export async function deleteFile(input: DeleteFileInput): Promise<StoredFileReco
     detail: `Đã xóa tệp "${record.originalName}" khỏi ${record.provider}`,
   });
 
-  saveRuntimeStore(store);
-
-  return record;
+  return mapPrismaStoredFile(updatedRow);
 }
 
 export async function replaceFile(input: {
   targetFileId: string;
   replacement: UploadImageInput | UploadPodcastInput | UploadPdfInput;
 }): Promise<StoredFileRecord> {
-  const existing = getFileMetadata(input.targetFileId);
+  const existing = await getFileMetadata(input.targetFileId);
+
+  const orClauses: Array<{
+    id?: string;
+    objectKey?: string;
+    cloudinaryPublicId?: string;
+  }> = [{ id: existing.id }];
+  if (existing.storagePath) {
+    orClauses.push({ objectKey: existing.storagePath });
+  }
+  if (existing.cloudinaryPublicId) {
+    orClauses.push({ cloudinaryPublicId: existing.cloudinaryPublicId });
+  }
+
+  const linkedResource = await prisma.resourceFile.findFirst({
+    where: {
+      deletedAt: null,
+      OR: orClauses,
+    },
+  });
+
+  const inheritedVisibility = existing.isPublic ? "public" : "private";
 
   let created: StoredFileRecord;
   if (existing.fileType === "IMAGE") {
@@ -1201,13 +1703,17 @@ export async function replaceFile(input: {
       referencedBy: existing.referencedBy,
     });
   } else if (existing.fileType === "AUDIO") {
+    const rep = input.replacement as UploadPodcastInput;
     created = await uploadPodcast({
-      ...(input.replacement as UploadPodcastInput),
+      ...rep,
+      visibility: rep.visibility ?? inheritedVisibility,
       referencedBy: existing.referencedBy,
     });
   } else {
+    const rep = input.replacement as UploadPdfInput;
     created = await uploadPdf({
-      ...(input.replacement as UploadPdfInput),
+      ...rep,
+      visibility: rep.visibility ?? inheritedVisibility,
       referencedBy: existing.referencedBy,
     });
   }
@@ -1219,7 +1725,101 @@ export async function replaceFile(input: {
     forceReplace: true,
   });
 
-  recordAuditLog({
+  const mappedFileType: ResourceFileItem["fileType"] =
+    created.fileType === "AUDIO" ||
+    created.fileType === "IMAGE" ||
+    created.fileType === "SLIDE" ||
+    created.fileType === "WORKSHEET"
+      ? created.fileType
+      : "PDF";
+
+  if (linkedResource) {
+    await prisma.$transaction(async (tx) => {
+      const folderExists = await tx.resourceFolder.findUnique({
+        where: { id: linkedResource.folderId },
+        select: { id: true },
+      });
+      if (!folderExists) return;
+
+      await tx.resourceFile.create({
+        data: {
+          id: created.id,
+          folderId: linkedResource.folderId,
+          folderName: linkedResource.folderName,
+          title: linkedResource.title,
+          description: linkedResource.description,
+          fileType: mappedFileType,
+          provider: created.provider,
+          mimeType: created.mimeType,
+          bucketName: created.bucketName,
+          storagePath: created.storagePath,
+          cloudinaryPublicId: created.cloudinaryPublicId,
+          publicUrl: created.isPublic ? created.publicUrl : null,
+          objectKey: created.storagePath,
+          size: formatBytesLabel(created.fileSize),
+          sizeBytes: created.fileSize,
+          updatedAt: new Date().toLocaleDateString("vi-VN"),
+          downloads: linkedResource.downloads,
+          pagesOrDuration: linkedResource.pagesOrDuration,
+          level: linkedResource.level,
+          visibility: created.isPublic ? "public" : "private",
+          category: created.category,
+          ownerId: created.ownerId,
+          originalName: created.originalName,
+          storedName: created.storedName,
+          previewSummary: [...linkedResource.previewSummary],
+        },
+      });
+
+      await tx.resourceFolder.update({
+        where: { id: linkedResource.folderId },
+        data: { itemCount: { increment: 1 } },
+      });
+    });
+  }
+
+  const replacementUrl =
+    created.isPublic && created.publicUrl
+      ? created.publicUrl
+      : `/api/admin/storage/download-url?fileId=${encodeURIComponent(created.id)}`;
+  const replacementSize = formatBytesLabel(created.fileSize);
+
+  const cwWhere: Array<{
+    storedFileId?: string;
+    id?: string;
+    url?: string;
+  }> = [{ storedFileId: existing.id }, { id: existing.id }];
+  if (existing.publicUrl) {
+    cwWhere.push({ url: existing.publicUrl });
+  }
+  await prisma.curriculumWeekAttachment.updateMany({
+    where: { OR: cwWhere },
+    data: {
+      storedFileId: created.id,
+      url: replacementUrl,
+      sizeLabel: replacementSize,
+      sizeBytes: created.fileSize,
+    },
+  });
+
+  const sesWhere: Array<{
+    storedFileId?: string;
+    id?: string;
+    url?: string;
+  }> = [{ storedFileId: existing.id }, { id: existing.id }];
+  if (existing.publicUrl) {
+    sesWhere.push({ url: existing.publicUrl });
+  }
+  await prisma.sessionAttachmentFile.updateMany({
+    where: { OR: sesWhere },
+    data: {
+      storedFileId: created.id,
+      url: replacementUrl,
+      size: replacementSize,
+    },
+  });
+
+  await recordAuditLog({
     action: "REPLACE_FILE",
     provider: created.provider,
     actorId: created.ownerId ?? "admin",
@@ -1232,44 +1832,56 @@ export async function replaceFile(input: {
   return created;
 }
 
-export function listStoredFiles(options?: {
+export async function listStoredFiles(options?: {
   provider?: StorageProviderName | "all";
   fileType?: StoredFileRecord["fileType"] | "all";
   category?: string;
   search?: string;
   includeDeleted?: boolean;
-}): StoredFileRecord[] {
-  const store = getRuntimeStore();
-  return store.storedFiles.filter((f) => {
-    if (!options?.includeDeleted && f.deletedAt) return false;
-    if (options?.provider && options.provider !== "all" && f.provider !== options.provider) {
-      return false;
-    }
-    if (options?.fileType && options.fileType !== "all" && f.fileType !== options.fileType) {
-      return false;
-    }
-    if (options?.category && options.category !== "all" && f.category !== options.category) {
-      return false;
-    }
-    const q = options?.search?.trim().toLowerCase() ?? "";
-    if (
-      q &&
-      !f.originalName.toLowerCase().includes(q) &&
-      !f.category.toLowerCase().includes(q) &&
-      !(f.storagePath ?? "").toLowerCase().includes(q)
-    ) {
-      return false;
-    }
-    return true;
+}): Promise<StoredFileRecord[]> {
+  const rows = await prisma.storedFile.findMany({
+    where: {
+      ...(!options?.includeDeleted ? { deletedAt: null } : {}),
+      ...(options?.provider && options.provider !== "all"
+        ? { provider: options.provider }
+        : {}),
+      ...(options?.fileType && options.fileType !== "all"
+        ? { fileType: options.fileType }
+        : {}),
+      ...(options?.category && options.category !== "all"
+        ? { category: options.category }
+        : {}),
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "asc" }],
   });
+
+  const mapped = rows.map(mapPrismaStoredFile);
+  const q = options?.search?.trim().toLowerCase() ?? "";
+  if (!q) return mapped;
+
+  return mapped.filter(
+    (f) =>
+      f.originalName.toLowerCase().includes(q) ||
+      f.category.toLowerCase().includes(q) ||
+      (f.storagePath ?? "").toLowerCase().includes(q),
+  );
 }
 
-export function listStorageAuditLogs(): StorageAuditLogEntry[] {
-  return getRuntimeStore().storageAuditLogs;
+export async function listStorageAuditLogs(
+  limit = 500,
+): Promise<StorageAuditLogEntry[]> {
+  const rows = await prisma.storageAuditLog.findMany({
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit,
+  });
+  return rows.map(mapPrismaStorageAuditLog);
 }
 
-export function listOrphanedFiles(): OrphanedStorageObject[] {
-  return getRuntimeStore().orphanFiles;
+export async function listOrphanedFiles(): Promise<OrphanedStorageObject[]> {
+  const rows = await prisma.orphanedStorageFile.findMany({
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  return rows.map(mapPrismaOrphanedStorageFile);
 }
 
 // -----------------------------------------------------------------------------
@@ -1284,7 +1896,6 @@ export const createUploadUrlSchema = z.object({
   visibility: z.enum(["public", "private"]).default("public"),
   imageCategory: z
     .enum([
-      "student_avatar",
       "teacher_avatar",
       "project",
       "podcast_thumbnail",
@@ -1329,7 +1940,7 @@ export async function createUploadUrl(input: unknown): Promise<UploadTicket> {
         `Ảnh vượt quá giới hạn ${env.MAX_IMAGE_SIZE_MB} MB của Cloudinary Free`,
       );
     }
-    checkStorageQuota({ provider: "cloudinary", incomingSizeBytes: data.size });
+    await checkStorageQuota({ provider: "cloudinary", incomingSizeBytes: data.size });
     const category: ImageCategory =
       data.imageCategory ??
       (data.folder === "thumbnails"
@@ -1363,7 +1974,7 @@ export async function createUploadUrl(input: unknown): Promise<UploadTicket> {
         `Podcast vượt quá giới hạn ${env.MAX_AUDIO_SIZE_MB} MB của Supabase Free`,
       );
     }
-    checkStorageQuota({ provider: "supabase", incomingSizeBytes: data.size });
+    await checkStorageQuota({ provider: "supabase", incomingSizeBytes: data.size });
     const bucket =
       data.visibility === "public"
         ? env.SUPABASE_PUBLIC_BUCKET
@@ -1389,7 +2000,7 @@ export async function createUploadUrl(input: unknown): Promise<UploadTicket> {
         `PDF vượt quá giới hạn ${env.MAX_PDF_SIZE_MB} MB của Supabase Free`,
       );
     }
-    checkStorageQuota({ provider: "supabase", incomingSizeBytes: data.size });
+    await checkStorageQuota({ provider: "supabase", incomingSizeBytes: data.size });
     const bucket =
       data.visibility === "public"
         ? env.SUPABASE_PUBLIC_BUCKET
@@ -1502,7 +2113,27 @@ export const createResourceFileSchema = z.object({
   pagesOrDuration: z.string().trim().max(64).default("18 trang"),
   level: z.string().trim().max(64).default("IELTS 6.5+"),
   objectKey: z.string().trim().max(512).nullish(),
-  publicUrl: z.string().trim().max(1024).nullish(),
+  publicUrl: optionalSafeUrlSchema,
+  provider: z.enum(["cloudinary", "supabase", "r2", "s3", "local"]).optional(),
+  mimeType: z.string().trim().max(128).optional(),
+  bucketName: z.string().trim().max(128).nullish(),
+  cloudinaryPublicId: z.string().trim().max(512).nullish(),
+  category: z.string().trim().max(120).optional(),
+  originalName: z.string().trim().max(255).optional(),
+});
+
+export const updateResourceFileSchema = z.object({
+  title: z.string().trim().min(1).max(200).optional(),
+  folderId: z.string().trim().min(1).optional(),
+  fileType: z.enum(["PDF", "SLIDE", "AUDIO", "WORKSHEET", "IMAGE"]).optional(),
+  visibility: z.enum(["public", "private"]).optional(),
+  description: z.string().trim().max(1000).optional(),
+  size: z.string().trim().max(32).optional(),
+  sizeBytes: z.coerce.number().int().nonnegative().optional(),
+  pagesOrDuration: z.string().trim().max(64).optional(),
+  level: z.string().trim().max(64).optional(),
+  objectKey: z.string().trim().max(512).nullish(),
+  publicUrl: optionalSafeUrlSchema,
   provider: z.enum(["cloudinary", "supabase", "r2", "s3", "local"]).optional(),
   mimeType: z.string().trim().max(128).optional(),
   bucketName: z.string().trim().max(128).nullish(),
@@ -1514,59 +2145,93 @@ export const createResourceFileSchema = z.object({
 export async function listResourceFolders(options?: {
   publicOnly?: boolean;
 }): Promise<ResourceFolder[]> {
-  const store = getRuntimeStore();
-  if (options?.publicOnly) {
-    return store.folders.filter((f) => f.visibility === "public");
-  }
-  return store.folders;
+  const rows = await prisma.resourceFolder.findMany({
+    where: options?.publicOnly ? { visibility: "public" } : undefined,
+    orderBy: [{ id: "asc" }],
+  });
+  return rows.map(mapPrismaResourceFolder);
 }
 
 export async function listResourceFiles(options?: {
   publicOnly?: boolean;
   folderId?: string;
   fileType?: string;
+  level?: string;
   search?: string;
 }): Promise<ResourceFileItem[]> {
-  const store = getRuntimeStore();
-  return store.files.filter((f) => {
-    if (f.deletedAt) return false;
-    // Never leak private documents on public API (PHẦN 8.14)
-    if (options?.publicOnly && f.visibility !== "public") return false;
-    if (
-      options?.folderId &&
-      options.folderId !== "all" &&
-      f.folderId !== options.folderId
-    ) {
-      return false;
-    }
-    if (
-      options?.fileType &&
-      options.fileType !== "all" &&
-      f.fileType !== options.fileType
-    ) {
-      return false;
-    }
-    const q = options?.search?.trim().toLowerCase() ?? "";
-    if (
-      q &&
-      !f.title.toLowerCase().includes(q) &&
-      !f.description.toLowerCase().includes(q) &&
-      !f.folderName.toLowerCase().includes(q)
-    ) {
-      return false;
-    }
-    return true;
+  const validFileTypes = new Set(["PDF", "SLIDE", "AUDIO", "WORKSHEET", "IMAGE"]);
+  if (
+    options?.fileType &&
+    options.fileType !== "all" &&
+    !validFileTypes.has(options.fileType)
+  ) {
+    return [];
+  }
+
+  const rows = await prisma.resourceFile.findMany({
+    where: {
+      deletedAt: null,
+      // Never leak private documents on public API (PHẦN 8.14)
+      ...(options?.publicOnly ? { visibility: "public" } : {}),
+      ...(options?.folderId && options.folderId !== "all"
+        ? { folderId: options.folderId }
+        : {}),
+      ...(options?.fileType && options.fileType !== "all"
+        ? {
+            fileType: options.fileType as ResourceFileItem["fileType"],
+          }
+        : {}),
+      ...(options?.level && options.level !== "all"
+        ? { level: options.level }
+        : {}),
+    },
+    orderBy: [{ id: "asc" }],
+  });
+
+  const mapped = rows.map(mapPrismaResourceFile);
+  const search = options?.search?.trim() ?? "";
+  if (!search) return mapped;
+
+  return mapped.filter((f) => {
+    const rawText = [
+      f.title,
+      f.description,
+      f.folderName,
+      f.level,
+      ...(f.previewSummary ?? []),
+    ].join(" ");
+    return matchesNormalizedDocumentText(rawText, search);
   });
 }
 
 export async function createResourceFile(
   input: unknown,
+  actorId = "admin",
 ): Promise<ResourceFileItem> {
   const data = validate(createResourceFileSchema, input);
   const env = getServerEnv();
-  const store = getRuntimeStore();
-  const folder =
-    store.folders.find((f) => f.id === data.folderId) ?? store.folders[0];
+
+  let folder = await prisma.resourceFolder.findUnique({
+    where: { id: data.folderId },
+  });
+  if (!folder) {
+    folder = await prisma.resourceFolder.findFirst({
+      orderBy: [{ id: "asc" }],
+    });
+  }
+  if (!folder) {
+    folder = await prisma.resourceFolder.create({
+      data: {
+        id: "fld-writing",
+        name: "01. Academic Writing & Essays",
+        description: "Thư mục học liệu số mặc định",
+        parentId: null,
+        itemCount: 0,
+        updatedAt: new Date().toLocaleDateString("vi-VN"),
+        visibility: "public",
+      },
+    });
+  }
 
   const isImage = data.fileType === "IMAGE";
   const resolvedProvider: StorageProviderName =
@@ -1586,137 +2251,587 @@ export async function createResourceFile(
         ? "audio/mpeg"
         : "application/pdf");
 
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
   const storagePath =
     data.objectKey ??
     (isImage
-      ? `english-manager/resources/2026/11/${Date.now()}`
-      : `${data.visibility === "public" ? "resources/exercises" : "internal-documents"}/2026/11/${Date.now()}.pdf`);
+      ? `english-manager/resources/${yyyy}/${mm}/${Date.now()}`
+      : `${data.visibility === "public" ? "resources/exercises" : "internal-documents"}/${yyyy}/${mm}/${Date.now()}.pdf`);
 
-  const newFile: ResourceFileItem = {
-    id: `res-${Date.now()}`,
-    folderId: folder?.id ?? data.folderId,
-    folderName: folder?.name ?? "01. Academic Writing & Essays",
-    title: data.title,
-    description:
-      data.description ??
-      (isImage
-        ? "Hình ảnh học thuật đã được tối ưu tự động (f_auto, q_auto) trên Cloudinary Free."
-        : "Tài liệu học thuật lưu trữ trên Supabase Storage Free."),
-    fileType: data.fileType,
-    size: data.size,
-    sizeBytes: data.sizeBytes,
-    updatedAt: new Date().toLocaleDateString("vi-VN"),
-    downloads: 0,
-    pagesOrDuration: data.pagesOrDuration,
-    level: data.level,
-    visibility: isImage ? "public" : data.visibility,
-    objectKey: storagePath,
-    storagePath,
-    bucketName: resolvedBucket,
-    cloudinaryPublicId: isImage ? (data.cloudinaryPublicId ?? storagePath) : null,
-    provider: resolvedProvider,
-    mimeType: resolvedMime,
-    category: data.category ?? (isImage ? "resource" : "resources/exercises"),
-    originalName: data.originalName ?? data.title,
-    // Never save publicUrl for private files
-    publicUrl:
-      data.visibility === "private" && !isImage ? null : (data.publicUrl ?? null),
-    previewSummary: [
-      `Provider: ${resolvedProvider.toUpperCase()} · Đường dẫn: ${storagePath}`,
-      data.visibility === "private"
-        ? "Tệp riêng tư (Private Bucket) — truy cập qua Signed URL có thời hạn 15 phút."
-        : "Tệp công khai — sẵn sàng phân phối cho học sinh.",
-    ],
-  };
+  const newId = `res-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const effectiveVisibility: FileVisibility = isImage ? "public" : data.visibility;
+  const resolvedDescription =
+    data.description ??
+    (isImage
+      ? "Hình ảnh học thuật đã được tối ưu tự động (f_auto, q_auto) trên Cloudinary Free."
+      : "Tài liệu học thuật lưu trữ trên Supabase Storage Free.");
+  const resolvedCloudinaryPublicId = isImage
+    ? (data.cloudinaryPublicId ?? storagePath)
+    : null;
+  const resolvedCategory = data.category ?? (isImage ? "resource" : "resources/exercises");
+  const resolvedOriginalName = data.originalName ?? data.title;
+  const resolvedStoredName = storagePath.split("/").pop() ?? data.title;
+  // Never save publicUrl for private files; auto-derive public URL when omitted on public files
+  const resolvedPublicUrl =
+    effectiveVisibility === "private" && !isImage
+      ? null
+      : (data.publicUrl ?? (storagePath ? getPublicUrl(storagePath) : null));
+  const updatedAtLabel = now.toLocaleDateString("vi-VN");
+  const previewSummary = [
+    `Provider: ${resolvedProvider.toUpperCase()} · Đường dẫn: ${storagePath}`,
+    effectiveVisibility === "private"
+      ? "Tệp riêng tư (Private Bucket) — truy cập qua Signed URL có thời hạn 15 phút."
+      : "Tệp công khai — sẵn sàng phân phối cho học sinh.",
+  ];
 
-  store.files.unshift(newFile);
-  if (folder) {
-    folder.itemCount += 1;
-  }
+  const createdRow = await prisma.$transaction(async (tx) => {
+    const resRow = await tx.resourceFile.create({
+      data: {
+        id: newId,
+        folderId: folder.id,
+        folderName: folder.name,
+        title: data.title,
+        description: resolvedDescription,
+        fileType: data.fileType,
+        provider: resolvedProvider,
+        mimeType: resolvedMime,
+        bucketName: resolvedBucket,
+        storagePath,
+        cloudinaryPublicId: resolvedCloudinaryPublicId,
+        publicUrl: resolvedPublicUrl,
+        objectKey: storagePath,
+        size: data.size,
+        sizeBytes: data.sizeBytes,
+        updatedAt: updatedAtLabel,
+        downloads: 0,
+        pagesOrDuration: data.pagesOrDuration,
+        level: data.level,
+        visibility: effectiveVisibility,
+        category: resolvedCategory,
+        ownerId: actorId,
+        originalName: resolvedOriginalName,
+        storedName: resolvedStoredName,
+        previewSummary,
+      },
+    });
 
-  // Synchronize into StoredFileRecord table so quota & file inventory stay 100% consistent
-  const nowIso = new Date().toISOString();
-  store.storedFiles.unshift({
-    id: newFile.id,
-    originalName: newFile.originalName ?? newFile.title,
-    storedName: storagePath.split("/").pop() ?? newFile.title,
-    provider: resolvedProvider,
-    fileType: newFile.fileType,
-    mimeType: resolvedMime,
-    fileSize: newFile.sizeBytes,
-    bucketName: resolvedBucket,
-    storagePath,
-    cloudinaryPublicId: newFile.cloudinaryPublicId ?? null,
-    publicUrl: newFile.publicUrl ?? null,
-    isPublic: newFile.visibility === "public",
-    ownerId: "admin",
-    category: newFile.category ?? "general",
-    createdAt: nowIso,
-    updatedAt: nowIso,
-    deletedAt: null,
-    referencedBy: [],
+    await tx.resourceFolder.update({
+      where: { id: folder.id },
+      data: { itemCount: { increment: 1 } },
+    });
+
+    // Synchronize into StoredFile table so quota & file inventory stay 100% consistent
+    await tx.storedFile.create({
+      data: {
+        id: newId,
+        originalName: resolvedOriginalName,
+        storedName: resolvedStoredName,
+        provider: resolvedProvider,
+        fileType: data.fileType,
+        mimeType: resolvedMime,
+        fileSize: data.sizeBytes,
+        bucketName: resolvedBucket,
+        storagePath,
+        cloudinaryPublicId: resolvedCloudinaryPublicId,
+        publicUrl: resolvedPublicUrl,
+        isPublic: effectiveVisibility === "public",
+        ownerId: actorId,
+        category: resolvedCategory,
+        referencedBy: [],
+      },
+    });
+
+    return resRow;
   });
 
-  saveRuntimeStore(store);
+  await recordAuditLog({
+    action: isImage
+      ? "UPLOAD_IMAGE"
+      : data.fileType === "AUDIO"
+        ? "UPLOAD_PODCAST"
+        : "UPLOAD_PDF",
+    provider: resolvedProvider,
+    actorId,
+    targetId: createdRow.id,
+    targetPath: `${resolvedBucket ? `${resolvedBucket}/` : ""}${storagePath}`,
+    status: "SUCCESS",
+    detail: `Đã lưu học liệu "${createdRow.title}" (${createdRow.size}) [${createdRow.visibility.toUpperCase()}]`,
+  });
 
-  return newFile;
+  return mapPrismaResourceFile(createdRow);
 }
 
 export async function toggleResourceFileVisibility(
   id: unknown,
+  actorId = "admin",
 ): Promise<ResourceFileItem> {
   const validId = validate(idSchema, id);
   const env = getServerEnv();
-  const store = getRuntimeStore();
-  const idx = store.files.findIndex((f) => f.id === validId);
-  if (idx === -1) throw new NotFoundError("ResourceFile", validId);
 
-  const current = store.files[idx];
+  const current = await prisma.resourceFile.findFirst({
+    where: { id: validId, deletedAt: null },
+  });
+  if (!current) throw new NotFoundError("ResourceFile", validId);
+
   const nextVisibility: FileVisibility =
     current.visibility === "public" ? "private" : "public";
-  const updated: ResourceFileItem = {
-    ...current,
-    visibility: nextVisibility,
-    bucketName:
-      current.provider === "cloudinary"
-        ? null
-        : nextVisibility === "public"
-          ? env.SUPABASE_PUBLIC_BUCKET
-          : env.SUPABASE_PRIVATE_BUCKET,
-    publicUrl: nextVisibility === "private" ? null : current.publicUrl,
-  };
-  store.files[idx] = updated;
+  const isImage = current.fileType === "IMAGE";
+  const effectiveVisibility: FileVisibility = isImage ? "public" : nextVisibility;
+  const targetKey =
+    current.cloudinaryPublicId ?? current.storagePath ?? current.objectKey;
 
-  const sf = store.storedFiles.find((s) => s.id === validId);
-  if (sf) {
-    sf.isPublic = nextVisibility === "public";
-    sf.bucketName = updated.bucketName ?? null;
-    if (!sf.isPublic) sf.publicUrl = null;
-    sf.updatedAt = new Date().toISOString();
+  const nextBucketName =
+    current.provider === "cloudinary"
+      ? null
+      : effectiveVisibility === "public"
+        ? env.SUPABASE_PUBLIC_BUCKET
+        : env.SUPABASE_PRIVATE_BUCKET;
+
+  if (
+    current.provider === "supabase" &&
+    targetKey &&
+    current.bucketName &&
+    nextBucketName &&
+    current.bucketName !== nextBucketName
+  ) {
+    const provider = getStorageProvider("supabase");
+    await provider.moveObject?.(current.bucketName, nextBucketName, targetKey);
   }
 
-  saveRuntimeStore(store);
+  const restoredPublicUrl =
+    effectiveVisibility === "private"
+      ? null
+      : current.publicUrl || (targetKey ? getPublicUrl(targetKey) : null);
 
-  return updated;
+  const updatedRow = await prisma.$transaction(async (tx) => {
+    const resRow = await tx.resourceFile.update({
+      where: { id: validId },
+      data: {
+        visibility: effectiveVisibility,
+        bucketName: nextBucketName,
+        publicUrl: restoredPublicUrl,
+        updatedAt: new Date().toLocaleDateString("vi-VN"),
+      },
+    });
+
+    await tx.storedFile.updateMany({
+      where: { id: validId },
+      data: {
+        isPublic: effectiveVisibility === "public",
+        bucketName: nextBucketName,
+        publicUrl: restoredPublicUrl,
+      },
+    });
+
+    return resRow;
+  });
+
+  await recordAuditLog({
+    action: "TOGGLE_VISIBILITY",
+    provider: updatedRow.provider,
+    actorId,
+    targetId: updatedRow.id,
+    targetPath: targetKey ?? updatedRow.title,
+    status: "SUCCESS",
+    detail: `Đã chuyển "${updatedRow.title}" sang chế độ ${
+      effectiveVisibility === "public"
+        ? "Công khai (Public)"
+        : "Nội bộ (Private Signed URL)"
+    }`,
+  });
+
+  return mapPrismaResourceFile(updatedRow);
 }
 
 export async function deleteResourceFile(id: unknown): Promise<void> {
   const validId = validate(idSchema, id);
-  const store = getRuntimeStore();
 
-  const stored = store.storedFiles.find((s) => s.id === validId && !s.deletedAt);
+  const stored = await prisma.storedFile.findFirst({
+    where: { id: validId, deletedAt: null },
+    select: { id: true },
+  });
   if (stored) {
     await deleteFile({ id: stored.id, actorId: "admin", actorRole: "admin" });
     return;
   }
 
-  const idx = store.files.findIndex((f) => f.id === validId);
-  if (idx === -1) throw new NotFoundError("ResourceFile", validId);
+  const existing = await prisma.resourceFile.findFirst({
+    where: { id: validId, deletedAt: null },
+  });
+  if (!existing) throw new NotFoundError("ResourceFile", validId);
 
-  const [removed] = store.files.splice(idx, 1);
-  const folder = store.folders.find((f) => f.id === removed.folderId);
-  if (folder && folder.itemCount > 0) {
-    folder.itemCount -= 1;
+  await prisma.$transaction(async (tx) => {
+    await tx.resourceFile.delete({ where: { id: validId } });
+    const folder = await tx.resourceFolder.findUnique({
+      where: { id: existing.folderId },
+      select: { itemCount: true },
+    });
+    if (folder && folder.itemCount > 0) {
+      await tx.resourceFolder.update({
+        where: { id: existing.folderId },
+        data: { itemCount: Math.max(0, folder.itemCount - 1) },
+      });
+    }
+  });
+}
+
+export async function updateResourceFile(
+  id: unknown,
+  input: unknown,
+  actorId = "admin",
+): Promise<ResourceFileItem> {
+  const validId = validate(idSchema, id);
+  const data = validate(updateResourceFileSchema, input);
+  const env = getServerEnv();
+
+  const current = await prisma.resourceFile.findFirst({
+    where: { id: validId, deletedAt: null },
+  });
+  if (!current) throw new NotFoundError("ResourceFile", validId);
+
+  // Verify destination folder exists BEFORE mutating anything
+  let nextFolderId = current.folderId;
+  let nextFolderName = current.folderName;
+  const folderChanged = Boolean(data.folderId && data.folderId !== current.folderId);
+  if (folderChanged) {
+    const newFolder = await prisma.resourceFolder.findUnique({
+      where: { id: data.folderId! },
+    });
+    if (!newFolder) {
+      throw new NotFoundError("ResourceFolder", data.folderId!);
+    }
+    nextFolderId = newFolder.id;
+    nextFolderName = newFolder.name;
   }
-  saveRuntimeStore(store);
+
+  const nextFileType = data.fileType ?? current.fileType;
+  const nextVisibility = data.visibility ?? current.visibility;
+  const isImage = nextFileType === "IMAGE";
+  const effectiveVisibility: FileVisibility = isImage ? "public" : nextVisibility;
+  const resolvedProvider = data.provider ?? current.provider;
+  const resolvedBucket =
+    resolvedProvider === "cloudinary"
+      ? null
+      : data.bucketName ??
+        (effectiveVisibility === "public"
+          ? env.SUPABASE_PUBLIC_BUCKET
+          : env.SUPABASE_PRIVATE_BUCKET);
+  const nextStoragePath = data.objectKey ?? current.storagePath;
+  const nextObjectKey = data.objectKey !== undefined ? data.objectKey : current.objectKey;
+  const restoredPublicUrl =
+    effectiveVisibility === "private"
+      ? null
+      : data.publicUrl !== undefined
+        ? data.publicUrl
+        : current.publicUrl ||
+          (nextStoragePath ? getPublicUrl(nextStoragePath) : null);
+
+  const nextTitle = data.title ?? current.title;
+  const nextOriginalName = data.originalName ?? current.originalName;
+  const nextSizeBytes = data.sizeBytes ?? current.sizeBytes;
+
+  const updatedRow = await prisma.$transaction(async (tx) => {
+    if (folderChanged) {
+      const oldFolder = await tx.resourceFolder.findUnique({
+        where: { id: current.folderId },
+        select: { itemCount: true },
+      });
+      if (oldFolder && oldFolder.itemCount > 0) {
+        await tx.resourceFolder.update({
+          where: { id: current.folderId },
+          data: { itemCount: Math.max(0, oldFolder.itemCount - 1) },
+        });
+      }
+      await tx.resourceFolder.update({
+        where: { id: nextFolderId },
+        data: { itemCount: { increment: 1 } },
+      });
+    }
+
+    const resRow = await tx.resourceFile.update({
+      where: { id: validId },
+      data: {
+        folderId: nextFolderId,
+        folderName: nextFolderName,
+        title: nextTitle,
+        description: data.description ?? current.description,
+        fileType: nextFileType,
+        size: data.size ?? current.size,
+        sizeBytes: nextSizeBytes,
+        pagesOrDuration: data.pagesOrDuration ?? current.pagesOrDuration,
+        level: data.level ?? current.level,
+        visibility: effectiveVisibility,
+        objectKey: nextObjectKey,
+        storagePath: nextStoragePath,
+        bucketName: resolvedBucket,
+        cloudinaryPublicId:
+          data.cloudinaryPublicId !== undefined
+            ? data.cloudinaryPublicId
+            : current.cloudinaryPublicId,
+        provider: resolvedProvider,
+        mimeType: data.mimeType ?? current.mimeType,
+        category: data.category ?? current.category,
+        originalName: nextOriginalName,
+        publicUrl: restoredPublicUrl,
+        updatedAt: new Date().toLocaleDateString("vi-VN"),
+      },
+    });
+
+    await tx.storedFile.updateMany({
+      where: { id: validId },
+      data: {
+        originalName: nextOriginalName ?? nextTitle,
+        fileType: nextFileType,
+        fileSize: nextSizeBytes,
+        isPublic: effectiveVisibility === "public",
+        bucketName: resolvedBucket,
+        publicUrl: restoredPublicUrl,
+        storagePath: nextStoragePath,
+      },
+    });
+
+    return resRow;
+  });
+
+  await recordAuditLog({
+    action: "UPDATE_METADATA",
+    provider: resolvedProvider,
+    actorId,
+    targetId: updatedRow.id,
+    targetPath: updatedRow.storagePath ?? updatedRow.objectKey ?? updatedRow.title,
+    status: "SUCCESS",
+    detail: `Đã cập nhật metadata học liệu "${updatedRow.title}" (${updatedRow.folderName})`,
+  });
+
+  return mapPrismaResourceFile(updatedRow);
+}
+
+// -----------------------------------------------------------------------------
+//  ORPHANED STORAGE CLEANUP & RESOURCE FOLDER CRUD
+// -----------------------------------------------------------------------------
+
+export async function cleanupOrphanedFiles(options?: {
+  ids?: string[];
+  actorId?: string;
+  actorRole?: Role;
+}): Promise<{
+  cleanedCount: number;
+  failedCount: number;
+  remaining: OrphanedStorageObject[];
+}> {
+  if ((options?.actorRole ?? "admin") !== "admin") {
+    throw new ForbiddenError(
+      "Chỉ quản trị viên mới có quyền dọn dẹp tệp mồ côi trên hệ thống lưu trữ",
+    );
+  }
+
+  const env = getServerEnv();
+  const targetIds = options?.ids?.length ? options.ids : undefined;
+  const targets = await prisma.orphanedStorageFile.findMany({
+    where: targetIds ? { id: { in: targetIds } } : undefined,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+
+  let cleanedCount = 0;
+  let failedCount = 0;
+  const cleanedIds: string[] = [];
+
+  for (const orphan of targets) {
+    try {
+      const provider = getStorageProvider(orphan.provider);
+      await provider.delete({
+        bucket: orphan.bucketName,
+        storagePath: orphan.storagePath,
+        cloudinaryPublicId: orphan.cloudinaryPublicId,
+        visibility:
+          orphan.bucketName === env.SUPABASE_PRIVATE_BUCKET
+            ? "private"
+            : "public",
+      });
+      cleanedIds.push(orphan.id);
+      cleanedCount += 1;
+    } catch {
+      failedCount += 1;
+    }
+  }
+
+  if (cleanedIds.length > 0) {
+    await prisma.orphanedStorageFile.deleteMany({
+      where: { id: { in: cleanedIds } },
+    });
+  }
+
+  await recordAuditLog({
+    action: "CLEANUP_ORPHANS",
+    provider: targets[0]?.provider ?? "supabase",
+    actorId: options?.actorId ?? "admin",
+    targetId: "orphan-cleanup",
+    targetPath: `${cleanedCount} objects`,
+    status: failedCount > 0 && cleanedCount === 0 ? "FAILED" : "SUCCESS",
+    detail: `Đã dọn dẹp ${cleanedCount} tệp mồ côi khỏi Cloud Storage${
+      failedCount > 0 ? ` (${failedCount} tệp lỗi)` : ""
+    }`,
+  });
+
+  const remaining = await listOrphanedFiles();
+  return {
+    cleanedCount,
+    failedCount,
+    remaining,
+  };
+}
+
+export const createResourceFolderSchema = z.object({
+  name: z.string().trim().min(1, "Tên thư mục không được để trống").max(120),
+  description: z.string().trim().max(500).default("Thư mục học liệu số"),
+  visibility: z.enum(["public", "private"]).default("public"),
+  parentId: z.string().trim().nullish(),
+});
+
+export const updateResourceFolderSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1, "Tên thư mục không được để trống")
+    .max(120)
+    .optional(),
+  description: z.string().trim().max(500).optional(),
+  visibility: z.enum(["public", "private"]).optional(),
+  parentId: z.string().trim().nullish(),
+});
+
+export async function createResourceFolder(
+  input: unknown,
+): Promise<ResourceFolder> {
+  const data = validate(createResourceFolderSchema, input);
+
+  const duplicate = await prisma.resourceFolder.findFirst({
+    where: {
+      name: { equals: data.name, mode: "insensitive" },
+    },
+    select: { id: true },
+  });
+  if (duplicate) {
+    throw new ConflictError(`Thư mục "${data.name}" đã tồn tại`);
+  }
+
+  const created = await prisma.resourceFolder.create({
+    data: {
+      id: `fld-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: data.name,
+      description: data.description,
+      parentId: data.parentId ?? null,
+      itemCount: 0,
+      updatedAt: new Date().toLocaleDateString("vi-VN"),
+      visibility: data.visibility,
+    },
+  });
+
+  return mapPrismaResourceFolder(created);
+}
+
+export async function updateResourceFolder(
+  id: unknown,
+  input: unknown,
+): Promise<ResourceFolder> {
+  const validId = validate(idSchema, id);
+  const data = validate(updateResourceFolderSchema, input);
+
+  const current = await prisma.resourceFolder.findUnique({
+    where: { id: validId },
+  });
+  if (!current) throw new NotFoundError("ResourceFolder", validId);
+
+  if (data.name) {
+    const duplicate = await prisma.resourceFolder.findFirst({
+      where: {
+        id: { not: validId },
+        name: { equals: data.name, mode: "insensitive" },
+      },
+      select: { id: true },
+    });
+    if (duplicate) {
+      throw new ConflictError(`Thư mục "${data.name}" đã tồn tại`);
+    }
+  }
+
+  const nextName = data.name ?? current.name;
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.resourceFolder.update({
+      where: { id: validId },
+      data: {
+        name: nextName,
+        description: data.description ?? current.description,
+        visibility: data.visibility ?? current.visibility,
+        parentId: data.parentId !== undefined ? data.parentId : current.parentId,
+        updatedAt: new Date().toLocaleDateString("vi-VN"),
+      },
+    });
+
+    if (nextName !== current.name) {
+      await tx.resourceFile.updateMany({
+        where: { folderId: validId },
+        data: { folderName: nextName },
+      });
+    }
+
+    return row;
+  });
+
+  return mapPrismaResourceFolder(updated);
+}
+
+export async function deleteResourceFolder(id: unknown): Promise<void> {
+  const validId = validate(idSchema, id);
+
+  const current = await prisma.resourceFolder.findUnique({
+    where: { id: validId },
+  });
+  if (!current) throw new NotFoundError("ResourceFolder", validId);
+
+  const childCount = await prisma.resourceFile.count({
+    where: { folderId: validId, deletedAt: null },
+  });
+  if (childCount > 0) {
+    throw new ConflictError(
+      `Không thể xóa thư mục "${current.name}" vì vẫn còn tài liệu bên trong. Hãy chuyển hoặc xóa tài liệu trước.`,
+    );
+  }
+
+  await prisma.resourceFolder.delete({ where: { id: validId } });
+}
+
+export async function recordPublicResourceDownload(id: unknown): Promise<{
+  id: string;
+  title: string;
+  downloads: number;
+  publicUrl: string | null;
+}> {
+  const validId = validate(idSchema, id);
+
+  const file = await prisma.resourceFile.findFirst({
+    where: { id: validId, deletedAt: null },
+  });
+  if (!file) {
+    throw new NotFoundError("ResourceFile", validId);
+  }
+  if (file.visibility !== "public") {
+    throw new ForbiddenError(
+      "Tài liệu nội bộ yêu cầu xác thực học sinh để tải xuống.",
+    );
+  }
+
+  const updated = await prisma.resourceFile.update({
+    where: { id: validId },
+    data: { downloads: { increment: 1 } },
+  });
+
+  return {
+    id: updated.id,
+    title: updated.title,
+    downloads: updated.downloads,
+    publicUrl: updated.publicUrl ?? null,
+  };
 }

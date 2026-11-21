@@ -1,17 +1,31 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, beforeEach, describe, it } from "node:test";
 
 import { CLASSROOMS_DATA, STANDARD_TIME_SLOTS, type TimeSlotDef } from "@/services/classroom-data";
+import * as classroomService from "@/services/classroom.service";
+import { ConflictError } from "@/services/errors";
+import {
+  buildScheduleCsvContent,
+  buildScheduleIcsContent,
+  computeScheduleRangeKpis,
+  resolveScheduleOccurrences,
+} from "@/services/schedule-calendar-helpers";
 import {
   isTimeOverlapping,
   parseScheduleStringToSlots,
   formatSlotsToScheduleString,
   getOccupiedSlotsMap,
+  normalizeRoomKey,
   normalizeTimeString,
   validateNewTimeSlot,
   sortTimeSlots,
   checkCanDeleteTimeSlot,
 } from "@/services/schedule-helper";
+import {
+  hasTestDatabase,
+  resetAndSeedTestDatabase,
+  teardownTestDatabase,
+} from "./test-db";
 
 describe("Schedule Helper — Xếp Lịch Cố Định & Chống Trùng Khung Giờ", () => {
   describe("1. Kiểm tra va chạm khung giờ (isTimeOverlapping)", () => {
@@ -234,42 +248,56 @@ describe("Schedule Helper — Xếp Lịch Cố Định & Chống Trùng Khung G
     });
   });
 
-  describe("7. Quản lý Ca học & Kiểm soát Xung đột (Schedule Session Integration)", () => {
-    it("7.1. Tạo ca học mới thành công", async () => {
-      const { createClassSession } = await import("@/services/schedule.service");
-      const session = await createClassSession({
-        classCode: "IF-01",
-        dayOfWeek: 6, // Thứ Bảy
-        startTime: "14:30",
-        endTime: "16:30",
-        room: "Phòng 301 · Cơ sở Nguyễn Du",
-        topic: "Luyện đề Reading Cam 18 Test 2",
+  describe(
+    "7. Quản lý Ca học & Kiểm soát Xung đột (PostgreSQL Schedule Session Integration)",
+    { skip: !hasTestDatabase() },
+    () => {
+      beforeEach(async () => {
+        await resetAndSeedTestDatabase();
       });
 
-      assert.strictEqual(session.classCode, "IF-01");
-      assert.strictEqual(session.dayOfWeek, 6);
-      assert.strictEqual(session.startTime, "14:30");
-      assert.strictEqual(session.endTime, "16:30");
-      assert.strictEqual(session.room, "Phòng 301 · Cơ sở Nguyễn Du");
-      assert.strictEqual(session.topic, "Luyện đề Reading Cam 18 Test 2");
-    });
-
-    it("7.2. Tự động nhận diện xung đột khi ca học mới bị đè khung giờ (isTimeOverlapping)", async () => {
-      const { createClassSession } = await import("@/services/schedule.service");
-      // Ca 1: Thứ Hai 17:45 - 19:45 đã có (IF-01)
-      // Tạo ca 2 đè giờ vào Thứ Hai: 18:00 - 20:00
-      const conflictingSession = await createClassSession({
-        classCode: "II-01",
-        dayOfWeek: 1, // Thứ Hai
-        startTime: "18:00",
-        endTime: "20:00",
-        room: "Phòng 302 · Cơ sở Nguyễn Du",
-        topic: "Speaking Part 2 & 3",
+      after(async () => {
+        await teardownTestDatabase();
       });
 
-      assert.strictEqual(conflictingSession.hasConflict, true, "Phải gắn cờ hasConflict khi trùng khung giờ");
-    });
-  });
+      it("7.1. Tạo ca học mới thành công", async () => {
+        const { createClassSession } = await import("@/services/schedule.service");
+        const session = await createClassSession({
+          classCode: "IF-01",
+          dayOfWeek: 6, // Thứ Bảy
+          startTime: "14:30",
+          endTime: "16:30",
+          room: "Phòng 301 · Cơ sở Nguyễn Du",
+          topic: "Luyện đề Reading Cam 18 Test 2",
+        });
+
+        assert.strictEqual(session.classCode, "IF-01");
+        assert.strictEqual(session.dayOfWeek, 6);
+        assert.strictEqual(session.startTime, "14:30");
+        assert.strictEqual(session.endTime, "16:30");
+        assert.strictEqual(session.room, "Phòng 301 · Cơ sở Nguyễn Du");
+        assert.strictEqual(session.topic, "Luyện đề Reading Cam 18 Test 2");
+      });
+
+      it("7.2. Chặn cứng xung đột khi ca học mới bị đè khung giờ giáo viên/phòng học (ConflictError)", async () => {
+        const { createClassSession } = await import("@/services/schedule.service");
+        // Ca 1: Thứ Hai 17:45 - 19:45 đã có (IF-01)
+        // Tạo ca 2 đè giờ vào Thứ Hai: 18:00 - 20:00 -> Phải ném ConflictError
+        await assert.rejects(
+          () =>
+            createClassSession({
+              classCode: "II-01",
+              dayOfWeek: 1, // Thứ Hai
+              startTime: "18:00",
+              endTime: "20:00",
+              room: "Phòng 302 · Cơ sở Nguyễn Du",
+              topic: "Speaking Part 2 & 3",
+            }),
+          ConflictError,
+        );
+      });
+    },
+  );
 
   describe("8. Đồng bộ Lịch Lớp học & Sắp xếp Thời gian (Schedule Sync & Chronological Order)", () => {
     it("8.1. formatSessionsToScheduleSummary định dạng chuẩn tiếng Việt cho 3+ ca học", async () => {
@@ -340,67 +368,153 @@ describe("Schedule Helper — Xếp Lịch Cố Định & Chống Trùng Khung G
       assert.strictEqual(slots[2].dayNumber, 5);
     });
 
-    it("8.3. Thêm ca học mới tự động cập nhật scheduleSummary của lớp và sắp xếp theo thời gian", async () => {
-      const { createClassSession, listWeeklySchedule } = await import("@/services/schedule.service");
-      const { getClassroomById } = await import("@/services/classroom.service");
+    describe(
+      "8.3–8.4. Đồng bộ scheduleSummary trên PostgreSQL",
+      { skip: !hasTestDatabase() },
+      () => {
+        beforeEach(async () => {
+          await resetAndSeedTestDatabase();
+        });
 
-      // Thêm ca Thứ 7 sáng cho lớp II-01
-      const created = await createClassSession({
-        classCode: "II-01",
-        dayOfWeek: 6, // Thứ Bảy
-        startTime: "09:00",
-        endTime: "11:00",
-        room: "Phòng 302 · Cơ sở Nguyễn Du",
-        topic: "Mock test Speaking",
-      });
+        after(async () => {
+          await teardownTestDatabase();
+        });
 
-      assert.strictEqual(created.classCode, "II-01");
+        it("8.3. Thêm ca học mới tự động cập nhật scheduleSummary của lớp và sắp xếp theo thời gian", async () => {
+          const { createClassSession, listWeeklySchedule } = await import(
+            "@/services/schedule.service"
+          );
 
-      // Kiểm tra scheduleSummary của lớp II-01 được cập nhật
-      const cls = await getClassroomById("cls-ii-01");
-      assert.ok(
-        cls.scheduleSummary.includes("Thứ 7") || cls.scheduleSummary.includes("09:00"),
-        `scheduleSummary phải chứa thông tin ca mới Thứ 7. Thực tế: ${cls.scheduleSummary}`,
-      );
+          // Thêm ca Thứ 7 chiều (trống lịch) cho lớp II-01
+          const created = await createClassSession({
+            classCode: "II-01",
+            dayOfWeek: 6, // Thứ Bảy
+            startTime: "14:30",
+            endTime: "16:30",
+            room: "Phòng 302 · Cơ sở Nguyễn Du",
+            topic: "Mock test Speaking",
+          });
 
-      // Kiểm tra listWeeklySchedule trả về đã được sắp xếp theo thời gian
-      const saturdaySessions = await listWeeklySchedule({ dayOfWeek: 6 });
-      for (let i = 0; i < saturdaySessions.length - 1; i++) {
-        assert.ok(
-          saturdaySessions[i].startTime <= saturdaySessions[i + 1].startTime,
-          "Các ca trong ngày phải được sắp xếp tăng dần theo startTime",
-        );
-      }
+          assert.strictEqual(created.classCode, "II-01");
+
+          // Kiểm tra scheduleSummary của lớp II-01 được cập nhật
+          const cls = await classroomService.getClassroomById("cls-ii-01");
+          assert.ok(cls);
+          assert.ok(
+            cls.scheduleSummary.includes("Thứ 7") ||
+              cls.scheduleSummary.includes("14:30"),
+            `scheduleSummary phải chứa thông tin ca mới Thứ 7. Thực tế: ${cls.scheduleSummary}`,
+          );
+
+          // Kiểm tra listWeeklySchedule trả về đã được sắp xếp theo thời gian
+          const saturdaySessions = await listWeeklySchedule({ dayOfWeek: 6 });
+          for (let i = 0; i < saturdaySessions.length - 1; i++) {
+            assert.ok(
+              saturdaySessions[i].startTime <=
+                saturdaySessions[i + 1].startTime,
+              "Các ca trong ngày phải được sắp xếp tăng dần theo startTime",
+            );
+          }
+        });
+
+        it("8.4. Xóa ca học tự động cập nhật lại scheduleSummary của lớp", async () => {
+          const { createClassSession, deleteClassSession } = await import(
+            "@/services/schedule.service"
+          );
+
+          // Tạo một ca tạm cho lớp IF-01 vào Chủ Nhật
+          const tempSession = await createClassSession({
+            classCode: "IF-01",
+            dayOfWeek: 7, // Chủ Nhật
+            startTime: "14:30",
+            endTime: "16:30",
+            room: "Phòng 302 · Cơ sở Nguyễn Du",
+            topic: "Workshop ngữ pháp",
+          });
+
+          let cls = await classroomService.getClassroomById("cls-if-01");
+          assert.ok(cls);
+          assert.ok(cls.scheduleSummary.includes("Chủ Nhật"));
+
+          // Xóa ca này
+          const deleted = await deleteClassSession(tempSession.id);
+          assert.strictEqual(deleted, true);
+
+          // Kiểm tra scheduleSummary của lớp IF-01 không còn Chủ Nhật
+          cls = await classroomService.getClassroomById("cls-if-01");
+          assert.ok(cls);
+          assert.strictEqual(
+            cls.scheduleSummary.includes("Chủ Nhật"),
+            false,
+            "scheduleSummary phải tự động gỡ bỏ Chủ Nhật sau khi xóa ca",
+          );
+        });
+      },
+    );
+  });
+
+  describe("9. Chuẩn hóa Phòng, Calendar Occurrence Resolver & Xuất .ICS/CSV", () => {
+    it("9.1. normalizeRoomKey chuẩn hóa chính xác tên phòng kèm tên cơ sở", () => {
+      assert.strictEqual(normalizeRoomKey("Phòng 302 · Cơ sở Nguyễn Du"), "phòng 302");
+      assert.strictEqual(normalizeRoomKey("  phòng   302 "), "phòng 302");
+      assert.strictEqual(normalizeRoomKey(""), "");
     });
 
-    it("8.4. Xóa ca học tự động cập nhật lại scheduleSummary của lớp", async () => {
-      const { createClassSession, deleteClassSession } = await import("@/services/schedule.service");
-      const { getClassroomById } = await import("@/services/classroom.service");
-
-      // Tạo một ca tạm cho lớp IF-01 vào Chủ Nhật
-      const tempSession = await createClassSession({
-        classCode: "IF-01",
-        dayOfWeek: 7, // Chủ Nhật
-        startTime: "14:30",
-        endTime: "16:30",
-        room: "Phòng 302 · Cơ sở Nguyễn Du",
-        topic: "Workshop ngữ pháp",
+    it("9.2. resolveScheduleOccurrences tổng hợp đúng lịch tuần + ngoại lệ & KPIs", () => {
+      const occurrences = resolveScheduleOccurrences({
+        fromDate: "2026-11-16",
+        toDate: "2026-11-22",
+        sessions: [
+          {
+            id: "s-mon",
+            classCode: "IF-01",
+            className: "IELTS Foundation",
+            level: "B1+",
+            dayOfWeek: 1,
+            dayLabel: "Thứ Hai",
+            startTime: "17:45",
+            endTime: "19:45",
+            room: "Phòng 302",
+            topic: "Reading",
+            enrolledCount: 14,
+            capacity: 15,
+            status: "upcoming",
+          },
+        ],
+        exceptions: [
+          {
+            id: "exc-makeup",
+            type: "makeup",
+            classId: "cls-if-01",
+            classCode: "IF-01",
+            className: "IELTS Foundation",
+            level: "B1+",
+            originalDate: "2026-11-21",
+            newDate: "2026-11-21",
+            startTime: "14:00",
+            endTime: "16:00",
+            room: "Phòng 302",
+            topic: "Dạy bù Reading",
+            reason: "Ôn thi",
+            createdAt: "2026-11-16T08:00:00Z",
+          },
+        ],
+        classes: CLASSROOMS_DATA,
+        todayIso: "2026-11-18",
       });
 
-      let cls = await getClassroomById("cls-if-01");
-      assert.ok(cls.scheduleSummary.includes("Chủ Nhật"));
+      assert.strictEqual(occurrences.length, 2);
+      const kpis = computeScheduleRangeKpis(occurrences);
+      assert.strictEqual(kpis.totalActiveSessions, 2);
+      assert.strictEqual(kpis.makeupCount, 1);
+      assert.strictEqual(kpis.totalTeachingHours, 4);
 
-      // Xóa ca này
-      const deleted = await deleteClassSession(tempSession.id);
-      assert.strictEqual(deleted, true);
-
-      // Kiểm tra scheduleSummary của lớp IF-01 không còn Chủ Nhật
-      cls = await getClassroomById("cls-if-01");
-      assert.strictEqual(
-        cls.scheduleSummary.includes("Chủ Nhật"),
-        false,
-        "scheduleSummary phải tự động gỡ bỏ Chủ Nhật sau khi xóa ca",
-      );
+      const ics = buildScheduleIcsContent(occurrences);
+      assert.ok(ics.includes("BEGIN:VCALENDAR"));
+      assert.ok(ics.includes("BEGIN:VEVENT"));
+      const csv = buildScheduleCsvContent(occurrences);
+      assert.ok(csv.startsWith("\uFEFF"));
+      assert.ok(csv.includes("IF-01"));
     });
   });
 });

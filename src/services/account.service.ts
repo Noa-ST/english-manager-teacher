@@ -1,3 +1,4 @@
+import type { User } from "@supabase/supabase-js";
 import { z } from "zod";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
@@ -5,7 +6,7 @@ import type { Role } from "@/types";
 
 import { validate } from "./common";
 import { ConflictError, DomainError, NotFoundError } from "./errors";
-import { getRuntimeStore } from "./runtime-store";
+import * as studentService from "./student.service";
 
 /**
  * Admin-only Account Management service (Supabase Auth Admin API + Profiles + Student Linking).
@@ -47,16 +48,28 @@ export interface ManagedAccountItem {
   lastSignInAt: string | null;
 }
 
+async function listAllAuthUsers(
+  adminClient: ReturnType<typeof createSupabaseAdminClient>,
+) {
+  const users: User[] = [];
+  const perPage = 200;
+  for (let page = 1; page <= 50; page += 1) {
+    const { data, error } = await adminClient.auth.admin.listUsers({ page, perPage });
+    if (error) {
+      console.error("[account.service] listUsers error:", error);
+      break;
+    }
+    const batch = data?.users ?? [];
+    users.push(...batch);
+    if (batch.length < perPage) break;
+  }
+  return users;
+}
+
 export async function listStudentAccounts(): Promise<ManagedAccountItem[]> {
-  const store = getRuntimeStore();
+  const students = await studentService.listAllStudents({ status: "all" });
   const adminClient = createSupabaseAdminClient();
-
-  const { data: authList } = await adminClient.auth.admin.listUsers({
-    page: 1,
-    perPage: 200,
-  });
-
-  const authUsers = authList?.users ?? [];
+  const authUsers = await listAllAuthUsers(adminClient);
   const byStudentId = new Map<string, (typeof authUsers)[number]>();
   for (const u of authUsers) {
     const appMeta = (u.app_metadata ?? {}) as Record<string, unknown>;
@@ -65,7 +78,7 @@ export async function listStudentAccounts(): Promise<ManagedAccountItem[]> {
     }
   }
 
-  return store.students.map((stu) => {
+  return students.map((stu) => {
     const authUser = byStudentId.get(stu.id);
     const appMeta = (authUser?.app_metadata ?? {}) as Record<string, unknown>;
     const bannedUntil = (authUser as { banned_until?: string | null } | undefined)?.banned_until;
@@ -89,23 +102,19 @@ export async function listStudentAccounts(): Promise<ManagedAccountItem[]> {
 
 export async function createStudentAccount(input: unknown): Promise<ManagedAccountItem> {
   const { studentId, email, password } = validate(createStudentAccountSchema, input);
-  const store = getRuntimeStore();
-  const student = store.students.find(
-    (s) => s.id === studentId || s.code.toUpperCase() === studentId.toUpperCase(),
-  );
-  if (!student) {
-    throw new NotFoundError("Không tìm thấy hồ sơ học sinh để liên kết tài khoản.");
-  }
+  const student = await studentService.getStudentById(studentId).catch((err) => {
+    if (err instanceof NotFoundError) {
+      throw new NotFoundError("Không tìm thấy hồ sơ học sinh để liên kết tài khoản.");
+    }
+    throw err;
+  });
 
   const normalizedEmail = email.trim().toLowerCase();
   const adminClient = createSupabaseAdminClient();
 
-  // Check if this student already has a linked Supabase Auth account
-  const { data: existingList } = await adminClient.auth.admin.listUsers({
-    page: 1,
-    perPage: 200,
-  });
-  const alreadyLinked = (existingList?.users ?? []).find((u) => {
+  // Check across ALL auth pages if this student already has a linked Supabase Auth account
+  const existingUsers = await listAllAuthUsers(adminClient);
+  const alreadyLinked = existingUsers.find((u) => {
     const meta = (u.app_metadata ?? {}) as Record<string, unknown>;
     return meta.student_id === student.id || u.email?.toLowerCase() === normalizedEmail;
   });
@@ -134,9 +143,10 @@ export async function createStudentAccount(input: unknown): Promise<ManagedAccou
   });
 
   if (createErr || !created.user) {
+    console.error("[account.service] createUser failed:", createErr);
     throw new DomainError(
       "CONFLICT",
-      createErr?.message || "Không thể tạo tài khoản học sinh trên Supabase Auth.",
+      "Không thể tạo tài khoản học sinh. Email có thể đã tồn tại hoặc mật khẩu chưa đáp ứng yêu cầu bảo mật.",
     );
   }
 
@@ -169,12 +179,11 @@ export async function createStudentAccount(input: unknown): Promise<ManagedAccou
     }
   } catch (err) {
     // Rollback created Auth user so no orphan account remains
+    console.error("[account.service] DB link failed (rolled back Auth user):", err);
     await adminClient.auth.admin.deleteUser(createdUser.id);
     throw new DomainError(
       "INTERNAL_ERROR",
-      err instanceof Error
-        ? `Liên kết hồ sơ học sinh thất bại (đã hoàn tác): ${err.message}`
-        : "Liên kết hồ sơ học sinh thất bại.",
+      "Liên kết hồ sơ học sinh thất bại và đã tự động hoàn tác. Vui lòng thử lại sau.",
     );
   }
 
@@ -218,7 +227,8 @@ export async function toggleStudentAccountActive(input: unknown): Promise<{
   });
 
   if (updateErr) {
-    throw new DomainError("INTERNAL_ERROR", updateErr.message);
+    console.error("[account.service] toggleStudentAccountActive failed:", updateErr);
+    throw new DomainError("INTERNAL_ERROR", "Không thể cập nhật trạng thái tài khoản lúc này.");
   }
 
   // Sync profiles table if present
@@ -246,7 +256,8 @@ export async function resetStudentPassword(input: unknown): Promise<{ profileId:
   });
 
   if (updateErr) {
-    throw new DomainError("INTERNAL_ERROR", updateErr.message);
+    console.error("[account.service] toggleStudentAccountActive failed:", updateErr);
+    throw new DomainError("INTERNAL_ERROR", "Không thể cập nhật trạng thái tài khoản lúc này.");
   }
 
   return { profileId };

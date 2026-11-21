@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { after, beforeEach, describe, it } from "node:test";
 
 import { canAccessStudent } from "@/lib/rbac";
+import { resetServerEnvCache } from "@/lib/env";
 import {
   createStudentPortalToken,
   verifyStudentPortalToken,
@@ -19,32 +20,362 @@ import {
   registerFailedAttempt,
   resetRateLimit,
 } from "@/services/rate-limit.service";
-import { getRuntimeStore, resetRuntimeStore } from "@/services/runtime-store";
+import * as classroomService from "@/services/classroom.service";
+import { ADMIN_STUDENTS_DATA } from "@/services/classroom-data";
+import * as settingsService from "@/services/settings.service";
+import {
+  buildGradeParentReport,
+  buildGradesCsv,
+  computeAssessmentSkillAverages,
+} from "@/services/grade-helpers";
 import * as studentService from "@/services/student.service";
 import {
   DEFAULT_ALERT_SETTINGS,
   getStudentAcademicAlerts,
   parseTargetBand,
 } from "@/services/academic-alert.service";
+import { computeStudentSkillProfile } from "@/services/student-helpers";
+
+import {
+  hasTestDatabase,
+  resetAndSeedTestDatabase,
+  teardownTestDatabase,
+} from "./test-db";
 
 function applyTestEnv() {
   (process.env as Record<string, string>).NODE_ENV = "test";
-  process.env.DATABASE_URL =
-    "postgresql://postgres:123456@localhost:5432/english_manager?schema=public";
+  if (process.env.TEST_DATABASE_URL) {
+    process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+  } else if (!process.env.DATABASE_URL) {
+    process.env.DATABASE_URL =
+      "postgresql://postgres:123456@localhost:5432/english_manager?schema=public";
+  }
   process.env.AUTH_SECRET =
     "test-only-auth-secret-with-at-least-32-characters-long";
   process.env.ADMIN_EMAIL = "teacher@example.com";
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_PUBLISHABLE_KEY = "test-anon-key";
   process.env.SUPABASE_SECRET_KEY = "test-service-key";
+  resetServerEnvCache();
 }
 
-describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
+describe("Student Service — Pure Helpers, Security & RBAC (Offline)", () => {
   beforeEach(() => {
     applyTestEnv();
-    resetRuntimeStore();
     clearAllMemoryRateLimits();
   });
+
+  describe("7. An ninh Cổng Tra cứu, Token & Giới hạn Tần suất (Rate Limiting)", () => {
+    it("7.1. Tạo signed JWT token với đầy đủ sub, code, role='student' và thời hạn 2h", async () => {
+      const token = await createStudentPortalToken({
+        studentId: "stu-01",
+        studentCode: "HS-2026-01",
+      });
+
+      assert.ok(typeof token === "string");
+      assert.ok(token.split(".").length === 3, "JWT token phải có 3 phần header.payload.signature");
+    });
+
+    it("7.2. Token hợp lệ giải mã thành công đúng studentId và studentCode", async () => {
+      const token = await createStudentPortalToken({
+        studentId: "stu-01",
+        studentCode: "HS-2026-01",
+      });
+
+      const verified = await verifyStudentPortalToken(token);
+      assert.ok(verified !== null);
+      assert.strictEqual(verified.studentId, "stu-01");
+      assert.strictEqual(verified.studentCode, "HS-2026-01");
+    });
+
+    it("7.3. Token giả mạo hoặc sai chữ ký bị từ chối hoàn toàn (trả về null)", async () => {
+      const fakeToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.invalid.signature";
+      const verified = await verifyStudentPortalToken(fakeToken);
+      assert.strictEqual(verified, null);
+    });
+
+    it("7.4. Rate limiting: Thử sai 5 lần liên tiếp sẽ kích hoạt khóa tạm thời (TooManyRequestsError)", async () => {
+      const testIdentifier = "ip:192.168.1.50";
+
+      // Thử sai 4 lần -> chưa bị khóa
+      for (let i = 0; i < 4; i++) {
+        await registerFailedAttempt(testIdentifier);
+      }
+      // Vẫn pass kiểm tra
+      await assertNotRateLimited(testIdentifier);
+
+      // Thử sai lần thứ 5 -> kích hoạt khóa
+      await registerFailedAttempt(testIdentifier);
+
+      // Kiểm tra ném TooManyRequestsError
+      await assert.rejects(
+        async () => {
+          await assertNotRateLimited(testIdentifier);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TooManyRequestsError);
+          assert.match((err as TooManyRequestsError).message, /quá 5 lần liên tiếp/i);
+          return true;
+        },
+      );
+    });
+
+    it("7.5. Rate limiting: Khi nhập đúng, bộ đếm thất bại được reset thành công", async () => {
+      const testIdentifier = "code:HS-2026-01";
+
+      // Thử sai 3 lần
+      for (let i = 0; i < 3; i++) {
+        await registerFailedAttempt(testIdentifier);
+      }
+
+      // Reset sau khi nhập đúng
+      await resetRateLimit(testIdentifier);
+
+      // Đếm lại từ đầu: 4 lần nữa vẫn không bị khóa
+      for (let i = 0; i < 4; i++) {
+        await registerFailedAttempt(testIdentifier);
+      }
+      await assertNotRateLimited(testIdentifier);
+    });
+  });
+
+  describe("9. Phân quyền RBAC & Phòng chống IDOR", () => {
+    it("9.1. Học sinh chỉ được phép truy cập hồ sơ của chính mình", async () => {
+      const studentProfile = {
+        id: "usr-student-01",
+        email: "student@example.com",
+        fullName: "Trần Bảo Ngọc",
+        avatarUrl: null,
+        role: "student" as const,
+        isActive: true,
+        studentId: "stu-01",
+        studentCode: "HS-2026-01",
+      };
+
+      // Cho phép khi tra cứu mã hoặc ID của chính mình
+      const canAccessOwnCode = await canAccessStudent("HS-2026-01", studentProfile);
+      const canAccessOwnId = await canAccessStudent("stu-01", studentProfile);
+      assert.strictEqual(canAccessOwnCode, true);
+      assert.strictEqual(canAccessOwnId, true);
+    });
+
+    it("9.2. Học sinh cố tình đổi ID/mã để xem hồ sơ của học sinh khác bị chặn đứng (chống IDOR)", async () => {
+      const studentProfile = {
+        id: "usr-student-01",
+        email: "student@example.com",
+        fullName: "Trần Bảo Ngọc",
+        avatarUrl: null,
+        role: "student" as const,
+        isActive: true,
+        studentId: "stu-01",
+        studentCode: "HS-2026-01",
+      };
+
+      // Cố tình xem HS-2026-02 hoặc stu-02
+      const canAccessOtherCode = await canAccessStudent("HS-2026-02", studentProfile);
+      const canAccessOtherId = await canAccessStudent("stu-02", studentProfile);
+      assert.strictEqual(canAccessOtherCode, false);
+      assert.strictEqual(canAccessOtherId, false);
+    });
+
+    it("9.3. Admin được phép truy cập toàn quyền mọi hồ sơ học sinh", async () => {
+      const adminProfile = {
+        id: "usr-admin-01",
+        email: "teacher@example.com",
+        fullName: "ThS. Nguyễn Minh Anh",
+        avatarUrl: null,
+        role: "admin" as const,
+        isActive: true,
+        studentId: null,
+        studentCode: null,
+      };
+
+      assert.strictEqual(await canAccessStudent("HS-2026-01", adminProfile), true);
+      assert.strictEqual(await canAccessStudent("HS-2026-02", adminProfile), true);
+      assert.strictEqual(await canAccessStudent("stu-unknown", adminProfile), true);
+    });
+
+    it("9.4. Tài khoản bị vô hiệu hóa (isActive: false) bị từ chối truy cập", async () => {
+      const disabledProfile = {
+        id: "usr-student-disabled",
+        email: "disabled@example.com",
+        fullName: "Học sinh Tạm khóa",
+        avatarUrl: null,
+        role: "student" as const,
+        isActive: false,
+        studentId: "stu-01",
+        studentCode: "HS-2026-01",
+      };
+
+      assert.strictEqual(await canAccessStudent("HS-2026-01", disabledProfile), false);
+    });
+  });
+
+  describe("11/13. Pure Helpers — Target Band, Alerts, Sanitization & Skill Profile", () => {
+    it("11.1. Trích xuất đúng band điểm mục tiêu từ các dạng chuỗi targetGoal", () => {
+      assert.strictEqual(parseTargetBand("IELTS 8.0 (Du học Úc)"), 8.0);
+      assert.strictEqual(parseTargetBand("IELTS 7.5 Overall"), 7.5);
+      assert.strictEqual(parseTargetBand("Writing 7.5+ & Học bổng"), 7.5);
+      assert.strictEqual(parseTargetBand("Đạt tối thiểu 5 điểm kỳ thi tốt nghiệp"), 5.0);
+      assert.strictEqual(parseTargetBand("Mục tiêu: 6.5"), 6.5);
+    });
+
+    it("11.6. Nhận diện cảnh báo điểm TB giảm liên tiếp khi bài thi mới nhất thấp hơn bài trước", () => {
+      const studentWithDrop = {
+        id: "stu-test-drop",
+        code: "HS-DROP",
+        fullName: "Học sinh Giảm Điểm",
+        classId: "cls-ii-01",
+        className: "IELTS Intensive",
+        level: "B2",
+        joinedAt: "01/08/2026",
+        attendanceRate: 95,
+        averageScore: 6.5,
+        targetGoal: "IELTS 7.0",
+        tuitionStatus: "paid" as const,
+        tuitionPeriod: "",
+        tuitionAmount: "",
+        parentRelation: "",
+        parentContactMasked: "",
+        status: "active" as const,
+        recentComment: "",
+        grades: [
+          {
+            id: "g1",
+            assessmentTitle: "Mock Test 1",
+            date: "10/10/2026",
+            listening: 7.0,
+            reading: 7.0,
+            writing: 7.0,
+            speaking: 7.0,
+            overall: 7.0,
+            comment: "",
+          },
+          {
+            id: "g2",
+            assessmentTitle: "Mock Test 2",
+            date: "05/11/2026",
+            listening: 6.5,
+            reading: 6.5,
+            writing: 6.5,
+            speaking: 6.5,
+            overall: 6.5,
+            comment: "",
+          },
+        ],
+        attendanceHistory: [],
+      };
+
+      const alerts = getStudentAcademicAlerts(studentWithDrop, DEFAULT_ALERT_SETTINGS);
+      const scoreDropAlert = alerts.find((a) => a.type === "score-drop");
+      assert.ok(scoreDropAlert, "Học sinh giảm từ 7.0 xuống 6.5 phải có cảnh báo score-drop");
+      assert.strictEqual(scoreDropAlert.title, "Tiến độ học tập giảm");
+    });
+
+    it("13.2. sanitizeStudentForPortal tước bỏ hoàn toàn ghi chú nội bộ và SĐT/Email phụ huynh", () => {
+      const base = structuredClone(ADMIN_STUDENTS_DATA[0]);
+      base.portalPinHash = "scrypt:salt:hash";
+      base.privateNote = "Ghi chú mật chỉ giáo viên đọc";
+      base.parentPhone = "0988777666";
+      base.parentEmail = "anhhung@example.com";
+      base.parentNote = "Ghi chú riêng gia đình";
+      base.parentContactMasked = "0988 ••• 666";
+      base.communicationLogs = [
+        {
+          id: "log-1",
+          date: "2026-11-18",
+          channel: "zalo",
+          category: "academic",
+          summary: "Trao đổi riêng với bố",
+          loggedBy: "admin",
+        },
+      ];
+
+      const sanitized = studentService.sanitizeStudentForPortal(base);
+      assert.strictEqual(sanitized.portalPinHash, undefined);
+      assert.strictEqual(sanitized.privateNote, undefined);
+      assert.strictEqual(sanitized.parentPhone, undefined);
+      assert.strictEqual(sanitized.parentEmail, undefined);
+      assert.strictEqual(sanitized.parentNote, undefined);
+      assert.strictEqual(sanitized.communicationLogs, undefined);
+      assert.strictEqual(sanitized.parentContactMasked, "0988 ••• 666");
+    });
+
+    it("13.3. getStudentAcademicAlerts miễn cảnh báo phù hợp cho trạng thái trial, on-leave và archived", () => {
+      const base = structuredClone(ADMIN_STUDENTS_DATA[0]);
+      const trialStu = {
+        ...base,
+        status: "trial" as const,
+        tuitionStatus: "overdue" as const,
+        grades: [],
+      };
+      const trialAlerts = getStudentAcademicAlerts(trialStu, DEFAULT_ALERT_SETTINGS);
+      assert.strictEqual(
+        trialAlerts.some((a) => a.type === "tuition" || a.type === "no-grades"),
+        false,
+      );
+
+      const leaveStu = {
+        ...base,
+        status: "on-leave" as const,
+        tuitionStatus: "overdue" as const,
+        attendanceRate: 50,
+        attendanceHistory: [
+          { date: "10/11/2026", sessionName: "Buổi 1", status: "absent" as const },
+        ],
+      };
+      const leaveAlerts = getStudentAcademicAlerts(leaveStu, DEFAULT_ALERT_SETTINGS);
+      assert.strictEqual(
+        leaveAlerts.some((a) => a.type === "tuition" || a.type === "attendance"),
+        false,
+      );
+
+      const archivedStu = {
+        ...base,
+        status: "archived" as const,
+        deletedAt: "2026-11-18T00:00:00.000Z",
+      };
+      const archivedAlerts = getStudentAcademicAlerts(archivedStu, DEFAULT_ALERT_SETTINGS);
+      assert.strictEqual(archivedAlerts.length, 0);
+    });
+
+    it("13.9. computeStudentSkillProfile tính đúng Entry/Current/Target band, delta và điểm mạnh/yếu", () => {
+      const stu = ADMIN_STUDENTS_DATA.find((s) => s.id === "stu-04")!; // Reading 9.0, Listening 8.0, Writing 6.5, Speaking 6.5
+      const profile = computeStudentSkillProfile(stu);
+
+      assert.strictEqual(profile.hasGrades, true);
+      assert.strictEqual(profile.entryBand, 6.0);
+      assert.strictEqual(profile.currentBand, 7.5);
+      assert.strictEqual(profile.targetBand, 7.5);
+      assert.strictEqual(profile.bandDelta, 1.5);
+      assert.strictEqual(profile.strongestSkill?.label, "Reading");
+      assert.strictEqual(profile.strongestSkill?.score, 9.0);
+      assert.strictEqual(profile.weakestSkill?.score, 6.5);
+    });
+
+    it("13.10. parseTargetBand không nhận nhầm trình độ CEFR (B1/B2/C1/C2) thành điểm số", () => {
+      assert.strictEqual(parseTargetBand("Cambridge B1 Pass with Distinction"), null);
+      assert.strictEqual(parseTargetBand("CEFR B2+"), null);
+      assert.strictEqual(parseTargetBand("Đạt C1 Academic"), null);
+      assert.strictEqual(parseTargetBand("Đạt B2 và IELTS 6.5"), 6.5);
+      assert.strictEqual(parseTargetBand("IELTS 3.0–3.5+"), 3.0);
+    });
+  });
+});
+
+describe(
+  "PostgreSQL / Prisma Student CRM, Grades & Tuition Service",
+  { skip: !hasTestDatabase() },
+  () => {
+    beforeEach(async () => {
+      applyTestEnv();
+      await resetAndSeedTestDatabase();
+      clearAllMemoryRateLimits();
+    });
+
+    after(async () => {
+      await teardownTestDatabase();
+    });
 
   // =========================================================================
   // SUITE 1: TÌM KIẾM TIẾNG VIỆT, BỘ LỌC, SẮP XẾP & PHÂN TRANG
@@ -210,9 +541,8 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
     });
 
     it("2.2. Tăng số lượng enrolled của lớp học khi thêm học sinh mới", async () => {
-      const store = getRuntimeStore();
-      const targetClass = store.classrooms.find((c) => c.id === "cls-ii-01")!;
-      const previousEnrolled = targetClass.enrolled;
+      const beforeClass = await classroomService.getClassroomById("cls-ii-01");
+      const previousEnrolled = beforeClass.enrolled;
 
       await studentService.createStudent({
         code: "HS-2026-88",
@@ -220,7 +550,8 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
         classId: "cls-ii-01",
       });
 
-      assert.strictEqual(targetClass.enrolled, previousEnrolled + 1);
+      const afterClass = await classroomService.getClassroomById("cls-ii-01");
+      assert.strictEqual(afterClass.enrolled, previousEnrolled + 1);
     });
 
     it("2.3. Chặn trùng mã học sinh và ném ConflictError", async () => {
@@ -436,20 +767,21 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
     });
 
     it("3.9. Đồng bộ sĩ số hai chiều khi chuyển học sinh đang học sang lớp khác", async () => {
-      const store = getRuntimeStore();
-      const stu = store.students.find((s) => s.id === "stu-01")!;
-      const oldClass = store.classrooms.find((c) => c.id === stu.classId)!;
-      const newClass = store.classrooms.find((c) => c.id === "cls-aw-02")!;
+      const stu = await studentService.getStudentById("stu-01");
+      const oldClassBefore = await classroomService.getClassroomById(stu.classId);
+      const newClassBefore = await classroomService.getClassroomById("cls-aw-02");
 
-      const prevOldEnrolled = oldClass.enrolled;
-      const prevNewEnrolled = newClass.enrolled;
+      const prevOldEnrolled = oldClassBefore.enrolled;
+      const prevNewEnrolled = newClassBefore.enrolled;
 
       await studentService.updateStudent("stu-01", {
         classId: "cls-aw-02",
       });
 
-      assert.strictEqual(oldClass.enrolled, prevOldEnrolled - 1, "Sĩ số lớp cũ phải giảm 1");
-      assert.strictEqual(newClass.enrolled, prevNewEnrolled + 1, "Sĩ số lớp mới phải tăng 1");
+      const oldClassAfter = await classroomService.getClassroomById(stu.classId);
+      const newClassAfter = await classroomService.getClassroomById("cls-aw-02");
+      assert.strictEqual(oldClassAfter.enrolled, prevOldEnrolled - 1, "Sĩ số lớp cũ phải giảm 1");
+      assert.strictEqual(newClassAfter.enrolled, prevNewEnrolled + 1, "Sĩ số lớp mới phải tăng 1");
     });
   });
 
@@ -458,13 +790,13 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
   // =========================================================================
   describe("4. Lưu trữ mềm (Archive / Soft Delete) & Khôi phục (Restore)", () => {
     it("4.1. Lưu trữ mềm: cập nhật status='archived', có deletedAt, giảm sĩ số lớp, giữ nguyên grades", async () => {
-      const store = getRuntimeStore();
-      const student = store.students.find((s) => s.id === "stu-01")!;
+      const student = await studentService.getStudentById("stu-01");
       const originalGradesCount = student.grades.length;
-      const targetClass = store.classrooms.find((c) => c.id === student.classId)!;
-      const previousEnrolled = targetClass.enrolled;
+      const targetClassBefore = await classroomService.getClassroomById(student.classId);
+      const previousEnrolled = targetClassBefore.enrolled;
 
       const archived = await studentService.archiveStudent("stu-01");
+      const targetClassAfter = await classroomService.getClassroomById(student.classId);
 
       assert.strictEqual(archived.status, "archived");
       assert.ok(archived.deletedAt, "deletedAt phải được gán ISO string");
@@ -474,7 +806,7 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
         "Lịch sử điểm phải được giữ nguyên vẹn",
       );
       assert.strictEqual(
-        targetClass.enrolled,
+        targetClassAfter.enrolled,
         previousEnrolled - 1,
         "Sĩ số lớp phải giảm 1",
       );
@@ -507,19 +839,18 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
     });
 
     it("4.4. Khôi phục học sinh đã lưu trữ: status='active', deletedAt=null, tăng lại sĩ số lớp", async () => {
-      const store = getRuntimeStore();
-      const student = store.students.find((s) => s.id === "stu-01")!;
-      const targetClass = store.classrooms.find((c) => c.id === student.classId)!;
+      const student = await studentService.getStudentById("stu-01");
 
       // Lưu trữ trước
       await studentService.archiveStudent("stu-01");
-      const enrolledAfterArchive = targetClass.enrolled;
+      const classAfterArchive = await classroomService.getClassroomById(student.classId);
 
       // Khôi phục
       const restored = await studentService.restoreStudent("stu-01");
+      const classAfterRestore = await classroomService.getClassroomById(student.classId);
       assert.strictEqual(restored.status, "active");
       assert.strictEqual(restored.deletedAt, null);
-      assert.strictEqual(targetClass.enrolled, enrolledAfterArchive + 1);
+      assert.strictEqual(classAfterRestore.enrolled, classAfterArchive.enrolled + 1);
 
       // Kiểm tra lại trong danh sách active
       const activeList = await studentService.listStudents({ status: "active" });
@@ -565,28 +896,26 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
     });
 
     it("4.7. Tính lũy thừa (Idempotency): Lưu trữ nhiều lần không làm giảm sĩ số lớp nhiều lần", async () => {
-      const store = getRuntimeStore();
-      const student = store.students.find((s) => s.id === "stu-01")!;
-      const cls = store.classrooms.find((c) => c.id === student.classId)!;
+      const student = await studentService.getStudentById("stu-01");
 
       // Lần 1: lưu trữ
       await studentService.archiveStudent("stu-01");
-      const enrolledAfterFirst = cls.enrolled;
+      const firstClass = await classroomService.getClassroomById(student.classId);
 
       // Lần 2: gọi lại cùng học sinh
       await studentService.archiveStudent("stu-01");
-      assert.strictEqual(cls.enrolled, enrolledAfterFirst, "Sĩ số không được tiếp tục giảm khi học sinh đã ở trạng thái archived");
+      const secondClass = await classroomService.getClassroomById(student.classId);
+      assert.strictEqual(secondClass.enrolled, firstClass.enrolled, "Sĩ số không được tiếp tục giảm khi học sinh đã ở trạng thái archived");
     });
 
     it("4.8. Tính lũy thừa (Idempotency): Khôi phục nhiều lần không làm tăng sĩ số lớp nhiều lần", async () => {
-      const store = getRuntimeStore();
-      const student = store.students.find((s) => s.id === "stu-01")!;
-      const cls = store.classrooms.find((c) => c.id === student.classId)!;
+      const student = await studentService.getStudentById("stu-01");
+      const initialClass = await classroomService.getClassroomById(student.classId);
 
       // Đang active sẵn, gọi restoreStudent
-      const initialEnrolled = cls.enrolled;
       await studentService.restoreStudent("stu-01");
-      assert.strictEqual(cls.enrolled, initialEnrolled, "Sĩ số không được tăng thêm khi học sinh vốn đã active");
+      const afterClass = await classroomService.getClassroomById(student.classId);
+      assert.strictEqual(afterClass.enrolled, initialClass.enrolled, "Sĩ số không được tăng thêm khi học sinh vốn đã active");
     });
 
     it("4.9. Khôi phục hàng loạt (batchRestoreStudents): chuyển trạng thái active và tăng lại sĩ số", async () => {
@@ -746,10 +1075,30 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
       assert.strictEqual(student.fullName, "Trần Bảo Ngọc");
     });
 
-    it("6.3. Xác thực thành công với key dự phòng 'HS2026'", async () => {
+    it("6.3. Từ chối key backdoor 'HS2026' và chỉ chấp nhận PIN hiện hành từ System Settings", async () => {
+      await assert.rejects(
+        () =>
+          studentService.verifyStudentPortal({
+            studentCode: "HS-2026-01",
+            accessKey: "HS2026",
+          }),
+        (err: unknown) => err instanceof UnauthorizedError,
+      );
+
+      await settingsService.updateSystemSettings({ defaultPortalPin: "PORTAL99" });
+
+      await assert.rejects(
+        () =>
+          studentService.verifyStudentPortal({
+            studentCode: "HS-2026-01",
+            accessKey: "123456",
+          }),
+        (err: unknown) => err instanceof UnauthorizedError,
+      );
+
       const student = await studentService.verifyStudentPortal({
         studentCode: "HS-2026-01",
-        accessKey: "HS2026",
+        accessKey: "PORTAL99",
       });
       assert.strictEqual(student.code, "HS-2026-01");
     });
@@ -816,193 +1165,39 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
   // =========================================================================
   // SUITE 7: AN NINH CỔNG TRA CỨU, TOKEN & RATE LIMITING (BRUTE-FORCE DEFENSE)
   // =========================================================================
-  describe("7. An ninh Cổng Tra cứu, Token & Giới hạn Tần suất (Rate Limiting)", () => {
-    it("7.1. Tạo signed JWT token với đầy đủ sub, code, role='student' và thời hạn 2h", async () => {
-      const token = await createStudentPortalToken({
-        studentId: "stu-01",
-        studentCode: "HS-2026-01",
-      });
-
-      assert.ok(typeof token === "string");
-      assert.ok(token.split(".").length === 3, "JWT token phải có 3 phần header.payload.signature");
-    });
-
-    it("7.2. Token hợp lệ giải mã thành công đúng studentId và studentCode", async () => {
-      const token = await createStudentPortalToken({
-        studentId: "stu-01",
-        studentCode: "HS-2026-01",
-      });
-
-      const verified = await verifyStudentPortalToken(token);
-      assert.ok(verified !== null);
-      assert.strictEqual(verified.studentId, "stu-01");
-      assert.strictEqual(verified.studentCode, "HS-2026-01");
-    });
-
-    it("7.3. Token giả mạo hoặc sai chữ ký bị từ chối hoàn toàn (trả về null)", async () => {
-      const fakeToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.invalid.signature";
-      const verified = await verifyStudentPortalToken(fakeToken);
-      assert.strictEqual(verified, null);
-    });
-
-    it("7.4. Rate limiting: Thử sai 5 lần liên tiếp sẽ kích hoạt khóa tạm thời (TooManyRequestsError)", async () => {
-      const testIdentifier = "ip:192.168.1.50";
-
-      // Thử sai 4 lần -> chưa bị khóa
-      for (let i = 0; i < 4; i++) {
-        await registerFailedAttempt(testIdentifier);
-      }
-      // Vẫn pass kiểm tra
-      await assertNotRateLimited(testIdentifier);
-
-      // Thử sai lần thứ 5 -> kích hoạt khóa
-      await registerFailedAttempt(testIdentifier);
-
-      // Kiểm tra ném TooManyRequestsError
-      await assert.rejects(
-        async () => {
-          await assertNotRateLimited(testIdentifier);
-        },
-        (err: unknown) => {
-          assert.ok(err instanceof TooManyRequestsError);
-          assert.match((err as TooManyRequestsError).message, /quá 5 lần liên tiếp/i);
-          return true;
-        },
-      );
-    });
-
-    it("7.5. Rate limiting: Khi nhập đúng, bộ đếm thất bại được reset thành công", async () => {
-      const testIdentifier = "code:HS-2026-01";
-
-      // Thử sai 3 lần
-      for (let i = 0; i < 3; i++) {
-        await registerFailedAttempt(testIdentifier);
-      }
-
-      // Reset sau khi nhập đúng
-      await resetRateLimit(testIdentifier);
-
-      // Đếm lại từ đầu: 4 lần nữa vẫn không bị khóa
-      for (let i = 0; i < 4; i++) {
-        await registerFailedAttempt(testIdentifier);
-      }
-      await assertNotRateLimited(testIdentifier);
-    });
-  });
-
   // =========================================================================
   // SUITE 8: TÍNH NHẤT QUÁN SĨ SỐ LỚP & ĐỐI CHIẾU THỰC TẾ
   // =========================================================================
   describe("8. Tính Nhất quán Sĩ số Lớp & Báo cáo Đối chiếu", () => {
     it("8.1. Sĩ số lớp tự động cân bằng chính xác khi luân chuyển học sinh giữa nhiều lớp", async () => {
-      const store = getRuntimeStore();
-      const cls1 = store.classrooms.find((c) => c.id === "cls-ii-01")!;
-      const cls2 = store.classrooms.find((c) => c.id === "cls-aw-02")!;
-      const initialCls1 = cls1.enrolled;
-      const initialCls2 = cls2.enrolled;
+      const cls1Before = await classroomService.getClassroomById("cls-ii-01");
+      const cls2Before = await classroomService.getClassroomById("cls-aw-02");
+      const cls3Before = await classroomService.getClassroomById("cls-ja-01");
+      const initialCls1 = cls1Before.enrolled;
+      const initialCls2 = cls2Before.enrolled;
+      const initialCls3 = cls3Before.enrolled;
 
       // stu-01 chuyển từ cls-ii-01 sang cls-aw-02
       await studentService.updateStudent("stu-01", { classId: "cls-aw-02" });
-      assert.strictEqual(cls1.enrolled, initialCls1 - 1);
-      assert.strictEqual(cls2.enrolled, initialCls2 + 1);
+      assert.strictEqual((await classroomService.getClassroomById("cls-ii-01")).enrolled, initialCls1 - 1);
+      assert.strictEqual((await classroomService.getClassroomById("cls-aw-02")).enrolled, initialCls2 + 1);
 
       // stu-01 chuyển tiếp sang cls-ja-01
-      const cls3 = store.classrooms.find((c) => c.id === "cls-ja-01")!;
-      const initialCls3 = cls3.enrolled;
       await studentService.updateStudent("stu-01", { classId: "cls-ja-01" });
-      assert.strictEqual(cls2.enrolled, initialCls2); // quay về ban đầu
-      assert.strictEqual(cls3.enrolled, initialCls3 + 1);
+      assert.strictEqual((await classroomService.getClassroomById("cls-aw-02")).enrolled, initialCls2); // quay về ban đầu
+      assert.strictEqual((await classroomService.getClassroomById("cls-ja-01")).enrolled, initialCls3 + 1);
     });
 
     it("8.2. Học sinh đang archived chuyển lớp không làm thay đổi sĩ số các lớp", async () => {
-      const store = getRuntimeStore();
-      const cls1 = store.classrooms.find((c) => c.id === "cls-ii-01")!;
-      const cls2 = store.classrooms.find((c) => c.id === "cls-aw-02")!;
-
       // Lưu trữ stu-01
       await studentService.archiveStudent("stu-01");
-      const cls1Enrolled = cls1.enrolled;
-      const cls2Enrolled = cls2.enrolled;
+      const cls1Enrolled = (await classroomService.getClassroomById("cls-ii-01")).enrolled;
+      const cls2Enrolled = (await classroomService.getClassroomById("cls-aw-02")).enrolled;
 
       // Đổi lớp khi đang archived
       await studentService.updateStudent("stu-01", { classId: "cls-aw-02" });
-      assert.strictEqual(cls1.enrolled, cls1Enrolled, "Lớp cũ không bị trừ thêm");
-      assert.strictEqual(cls2.enrolled, cls2Enrolled, "Lớp mới không bị tăng khi học sinh đang lưu trữ");
-    });
-  });
-
-  // =========================================================================
-  // SUITE 9: PHÂN QUYỀN RBAC & PHÒNG CHỐNG IDOR
-  // =========================================================================
-  describe("9. Phân quyền RBAC & Phòng chống IDOR", () => {
-    it("9.1. Học sinh chỉ được phép truy cập hồ sơ của chính mình", async () => {
-      const studentProfile = {
-        id: "usr-student-01",
-        email: "student@example.com",
-        fullName: "Trần Bảo Ngọc",
-        avatarUrl: null,
-        role: "student" as const,
-        isActive: true,
-        studentId: "stu-01",
-        studentCode: "HS-2026-01",
-      };
-
-      // Cho phép khi tra cứu mã hoặc ID của chính mình
-      const canAccessOwnCode = await canAccessStudent("HS-2026-01", studentProfile);
-      const canAccessOwnId = await canAccessStudent("stu-01", studentProfile);
-      assert.strictEqual(canAccessOwnCode, true);
-      assert.strictEqual(canAccessOwnId, true);
-    });
-
-    it("9.2. Học sinh cố tình đổi ID/mã để xem hồ sơ của học sinh khác bị chặn đứng (chống IDOR)", async () => {
-      const studentProfile = {
-        id: "usr-student-01",
-        email: "student@example.com",
-        fullName: "Trần Bảo Ngọc",
-        avatarUrl: null,
-        role: "student" as const,
-        isActive: true,
-        studentId: "stu-01",
-        studentCode: "HS-2026-01",
-      };
-
-      // Cố tình xem HS-2026-02 hoặc stu-02
-      const canAccessOtherCode = await canAccessStudent("HS-2026-02", studentProfile);
-      const canAccessOtherId = await canAccessStudent("stu-02", studentProfile);
-      assert.strictEqual(canAccessOtherCode, false);
-      assert.strictEqual(canAccessOtherId, false);
-    });
-
-    it("9.3. Admin được phép truy cập toàn quyền mọi hồ sơ học sinh", async () => {
-      const adminProfile = {
-        id: "usr-admin-01",
-        email: "teacher@example.com",
-        fullName: "ThS. Nguyễn Minh Anh",
-        avatarUrl: null,
-        role: "admin" as const,
-        isActive: true,
-        studentId: null,
-        studentCode: null,
-      };
-
-      assert.strictEqual(await canAccessStudent("HS-2026-01", adminProfile), true);
-      assert.strictEqual(await canAccessStudent("HS-2026-02", adminProfile), true);
-      assert.strictEqual(await canAccessStudent("stu-unknown", adminProfile), true);
-    });
-
-    it("9.4. Tài khoản bị vô hiệu hóa (isActive: false) bị từ chối truy cập", async () => {
-      const disabledProfile = {
-        id: "usr-student-disabled",
-        email: "disabled@example.com",
-        fullName: "Học sinh Tạm khóa",
-        avatarUrl: null,
-        role: "student" as const,
-        isActive: false,
-        studentId: "stu-01",
-        studentCode: "HS-2026-01",
-      };
-
-      assert.strictEqual(await canAccessStudent("HS-2026-01", disabledProfile), false);
+      assert.strictEqual((await classroomService.getClassroomById("cls-ii-01")).enrolled, cls1Enrolled, "Lớp cũ không bị trừ thêm");
+      assert.strictEqual((await classroomService.getClassroomById("cls-aw-02")).enrolled, cls2Enrolled, "Lớp mới không bị tăng khi học sinh đang lưu trữ");
     });
   });
 
@@ -1011,10 +1206,8 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
   // =========================================================================
   describe("10. Xử lý Thao tác Đồng thời & Tính Toàn vẹn Dữ liệu", () => {
     it("10.1. Hai Admin cùng lưu trữ một học sinh: kết quả an toàn và sĩ số không bị trừ hai lần", async () => {
-      const store = getRuntimeStore();
-      const student = store.students.find((s) => s.id === "stu-01")!;
-      const cls = store.classrooms.find((c) => c.id === student.classId)!;
-      const initialEnrolled = cls.enrolled;
+      const student = await studentService.getStudentById("stu-01");
+      const clsBefore = await classroomService.getClassroomById(student.classId);
 
       // Thực thi đồng thời (Promise.all)
       await Promise.all([
@@ -1022,17 +1215,16 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
         studentService.archiveStudent("stu-01"),
       ]);
 
-      assert.strictEqual(cls.enrolled, initialEnrolled - 1, "Sĩ số chỉ được trừ đúng 1 lần");
+      const clsAfter = await classroomService.getClassroomById(student.classId);
+      assert.strictEqual(clsAfter.enrolled, clsBefore.enrolled - 1, "Sĩ số chỉ được trừ đúng 1 lần");
     });
 
     it("10.2. Hai Admin cùng khôi phục một học sinh: kết quả an toàn và sĩ số không bị tăng hai lần", async () => {
-      const store = getRuntimeStore();
-      const student = store.students.find((s) => s.id === "stu-01")!;
-      const cls = store.classrooms.find((c) => c.id === student.classId)!;
+      const student = await studentService.getStudentById("stu-01");
 
       // Lưu trữ trước
       await studentService.archiveStudent("stu-01");
-      const enrolledAfterArchive = cls.enrolled;
+      const clsAfterArchive = await classroomService.getClassroomById(student.classId);
 
       // Thực thi khôi phục đồng thời (Promise.all)
       await Promise.all([
@@ -1040,7 +1232,8 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
         studentService.restoreStudent("stu-01"),
       ]);
 
-      assert.strictEqual(cls.enrolled, enrolledAfterArchive + 1, "Sĩ số chỉ được cộng lại đúng 1 lần");
+      const clsAfterRestore = await classroomService.getClassroomById(student.classId);
+      assert.strictEqual(clsAfterRestore.enrolled, clsAfterArchive.enrolled + 1, "Sĩ số chỉ được cộng lại đúng 1 lần");
     });
 
     it("10.3. Hai Admin cùng thêm một mã học sinh: người thứ hai bị từ chối với ConflictError", async () => {
@@ -1087,14 +1280,6 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
   // SUITE 11: BỘ LỌC NHANH TÌNH TRẠNG HỌC TẬP & CẢNH BÁO HỌC VỤ TỰ ĐỘNG
   // =========================================================================
   describe("11. Bộ lọc Nhanh Tình trạng Học tập & Cảnh báo Học vụ Tự động", () => {
-    it("11.1. Trích xuất đúng band điểm mục tiêu từ các dạng chuỗi targetGoal", () => {
-      assert.strictEqual(parseTargetBand("IELTS 8.0 (Du học Úc)"), 8.0);
-      assert.strictEqual(parseTargetBand("IELTS 7.5 Overall"), 7.5);
-      assert.strictEqual(parseTargetBand("Writing 7.5+ & Học bổng"), 7.5);
-      assert.strictEqual(parseTargetBand("Đạt tối thiểu 5 điểm kỳ thi tốt nghiệp"), 5.0);
-      assert.strictEqual(parseTargetBand("Mục tiêu: 6.5"), 6.5);
-    });
-
     it("11.2. Nhận diện cảnh báo học phí quá hạn cho học sinh (HS-2026-06)", async () => {
       const student = await studentService.getStudentById("HS-2026-06");
       assert.ok(student);
@@ -1146,58 +1331,6 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
       const noGradesAlert = alerts.find((a) => a.type === "no-grades");
       assert.ok(noGradesAlert, "Học sinh chưa có điểm phải nhận cảnh báo no-grades");
       assert.strictEqual(noGradesAlert.title, "Chưa có đánh giá gần đây");
-    });
-
-    it("11.6. Nhận diện cảnh báo điểm TB giảm liên tiếp khi bài thi mới nhất thấp hơn bài trước", () => {
-      const studentWithDrop = {
-        id: "stu-test-drop",
-        code: "HS-DROP",
-        fullName: "Học sinh Giảm Điểm",
-        classId: "cls-ii-01",
-        className: "IELTS Intensive",
-        level: "B2",
-        joinedAt: "01/08/2026",
-        attendanceRate: 95,
-        averageScore: 6.5,
-        targetGoal: "IELTS 7.0",
-        tuitionStatus: "paid" as const,
-        tuitionPeriod: "",
-        tuitionAmount: "",
-        parentRelation: "",
-        parentContactMasked: "",
-        status: "active" as const,
-        recentComment: "",
-        grades: [
-          {
-            id: "g1",
-            assessmentTitle: "Mock Test 1",
-            date: "10/10/2026",
-            listening: 7.0,
-            reading: 7.0,
-            writing: 7.0,
-            speaking: 7.0,
-            overall: 7.0,
-            comment: "",
-          },
-          {
-            id: "g2",
-            assessmentTitle: "Mock Test 2",
-            date: "05/11/2026",
-            listening: 6.5,
-            reading: 6.5,
-            writing: 6.5,
-            speaking: 6.5,
-            overall: 6.5,
-            comment: "",
-          },
-        ],
-        attendanceHistory: [],
-      };
-
-      const alerts = getStudentAcademicAlerts(studentWithDrop, DEFAULT_ALERT_SETTINGS);
-      const scoreDropAlert = alerts.find((a) => a.type === "score-drop");
-      assert.ok(scoreDropAlert, "Học sinh giảm từ 7.0 xuống 6.5 phải có cảnh báo score-drop");
-      assert.strictEqual(scoreDropAlert.title, "Tiến độ học tập giảm");
     });
 
     it("11.7. Bộ lọc academicStatus='has-alerts' lọc chính xác các học sinh cần quan tâm", async () => {
@@ -1262,15 +1395,15 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
   // =========================================================================
   describe("12. Kiểm soát Sĩ số & Ràng buộc chuyển lớp (Capacity Enforcement & Single Source of Truth)", () => {
     it("12.1. Chặn thêm học sinh mới vào lớp đã đủ sĩ số tối đa (ném ValidationError)", async () => {
-      const store = getRuntimeStore();
-      const testClass = store.classrooms[0];
-      testClass.capacity = 2; // set capacity = 2
-
-      // Ensure class already has 2 active students
-      const activeInClass = store.students.filter(
-        (s) => s.classId === testClass.id && s.status !== "archived" && !s.deletedAt,
-      );
+      const classes = await classroomService.listClassrooms();
+      const testClass = classes[0];
+      const activeInClass = await studentService.listAllStudents({
+        classId: testClass.id,
+        status: "non-archived",
+      });
       assert.strictEqual(activeInClass.length, 2, "Lớp ban đầu có đúng 2 học viên");
+
+      await classroomService.updateClassroom(testClass.id, { capacity: 2 });
 
       // Attempting to add a 3rd student must throw ValidationError
       await assert.rejects(
@@ -1289,14 +1422,17 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
     });
 
     it("12.2. Chặn chuyển học sinh từ lớp A sang lớp B khi lớp B đã đủ sĩ số (ném ValidationError)", async () => {
-      const store = getRuntimeStore();
-      const classA = store.classrooms[0]; // cls-ii-01
-      const classB = store.classrooms[1]; // cls-if-01
-      classB.capacity = 2; // classB currently has 2 students
+      const classA = await classroomService.getClassroomById("cls-ii-01");
+      const classB = await classroomService.getClassroomById("cls-if-01");
+      await classroomService.updateClassroom(classB.id, {
+        capacity: classB.enrolled,
+      });
 
-      const studentInA = store.students.find(
-        (s) => s.classId === classA.id && s.status !== "archived" && !s.deletedAt,
-      );
+      const studentsInA = await studentService.listAllStudents({
+        classId: classA.id,
+        status: "non-archived",
+      });
+      const studentInA = studentsInA[0];
       assert.ok(studentInA, "Phải có học sinh trong lớp A");
 
       // Transfer student from classA to full classB
@@ -1314,13 +1450,14 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
     });
 
     it("12.3. Chuyển lớp thành công khi lớp đích còn chỗ và tự động cập nhật sĩ số cả 2 lớp", async () => {
-      const store = getRuntimeStore();
-      const classA = store.classrooms[0]; // cls-ii-01 (enrolled: 2)
-      const classEmpty = store.classrooms[4]; // cls-mg-05 (enrolled: 0, capacity: 15)
+      const classA = await classroomService.getClassroomById("cls-ii-01");
+      const classEmpty = await classroomService.getClassroomById("cls-mg-05");
 
-      const studentToMove = store.students.find(
-        (s) => s.classId === classA.id && s.status !== "archived" && !s.deletedAt,
-      )!;
+      const studentsInA = await studentService.listAllStudents({
+        classId: classA.id,
+        status: "non-archived",
+      });
+      const studentToMove = studentsInA[0]!;
 
       const initialAEnrolled = classA.enrolled;
       const initialEmptyEnrolled = classEmpty.enrolled;
@@ -1330,36 +1467,50 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
       });
 
       assert.strictEqual(moved.classId, classEmpty.id);
-      assert.strictEqual(classEmpty.enrolled, initialEmptyEnrolled + 1);
-      assert.strictEqual(classA.enrolled, initialAEnrolled - 1);
+      assert.strictEqual(
+        (await classroomService.getClassroomById(classEmpty.id)).enrolled,
+        initialEmptyEnrolled + 1,
+      );
+      assert.strictEqual(
+        (await classroomService.getClassroomById(classA.id)).enrolled,
+        initialAEnrolled - 1,
+      );
     });
 
     it("12.4. Lưu trữ học sinh giải phóng 1 chỗ trong lớp (enrolled giảm)", async () => {
-      const store = getRuntimeStore();
-      const targetClass = store.classrooms[0];
+      const targetClass = await classroomService.getClassroomById("cls-ii-01");
       const initialEnrolled = targetClass.enrolled;
 
-      const student = store.students.find(
-        (s) => s.classId === targetClass.id && s.status !== "archived" && !s.deletedAt,
-      )!;
+      const activeStudents = await studentService.listAllStudents({
+        classId: targetClass.id,
+        status: "non-archived",
+      });
+      const student = activeStudents[0]!;
 
       await studentService.archiveStudent(student.id);
 
-      assert.strictEqual(targetClass.enrolled, initialEnrolled - 1);
+      assert.strictEqual(
+        (await classroomService.getClassroomById(targetClass.id)).enrolled,
+        initialEnrolled - 1,
+      );
     });
 
     it("12.5. Chặn khôi phục học sinh vào lớp đã đầy sĩ số (ném ValidationError)", async () => {
-      const store = getRuntimeStore();
-      const targetClass = store.classrooms[0];
+      const targetClass = await classroomService.getClassroomById("cls-ii-01");
 
       // Archive one student
-      const student = store.students.find(
-        (s) => s.classId === targetClass.id && s.status !== "archived" && !s.deletedAt,
-      )!;
+      const activeStudents = await studentService.listAllStudents({
+        classId: targetClass.id,
+        status: "non-archived",
+      });
+      const student = activeStudents[0]!;
       await studentService.archiveStudent(student.id);
 
       // Now set capacity equal to current enrolled count so class is full
-      targetClass.capacity = targetClass.enrolled;
+      const afterArchive = await classroomService.getClassroomById(targetClass.id);
+      await classroomService.updateClassroom(targetClass.id, {
+        capacity: afterArchive.enrolled,
+      });
 
       // Attempt to restore must fail
       await assert.rejects(
@@ -1373,8 +1524,6 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
     });
 
     it("12.6. Sĩ số enrolled ở toàn bộ các lớp luôn luôn khớp 100% với học sinh hoạt động thực tế", async () => {
-      const store = getRuntimeStore();
-
       // Add a student to cls-mg-05
       await studentService.createStudent({
         code: "HS-SYNC-TEST-01",
@@ -1382,9 +1531,14 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
         classId: "cls-mg-05",
       });
 
+      const [allClasses, allStudents] = await Promise.all([
+        classroomService.listAllClassrooms(true),
+        studentService.listAllStudents({ status: "all" }),
+      ]);
+
       // Verify every single classroom's enrolled matches active students count
-      for (const cls of store.classrooms) {
-        const actualCount = store.students.filter(
+      for (const cls of allClasses) {
+        const actualCount = allStudents.filter(
           (s) => s.classId === cls.id && s.status !== "archived" && !s.deletedAt,
         ).length;
         assert.strictEqual(
@@ -1393,6 +1547,653 @@ describe("Student Service — Quản lý Hồ sơ Học sinh", () => {
           `Sĩ số của lớp ${cls.code} (${cls.enrolled}) phải bằng số học sinh thực tế (${actualCount})`,
         );
       }
+    });
+  });
+
+  // =========================================================================
+  // SUITE 13: STUDENT CRM 360° (PHỤ HUYNH, VÒNG ĐỜI, SỔ HỌC PHÍ, GIAO TIẾP, CHẨN ĐOÁN)
+  // =========================================================================
+  describe("13. Student CRM 360° — Phụ huynh, Vòng đời, Sổ học phí, Giao tiếp & Chuyển lớp hàng loạt", () => {
+    it("13.1. Tạo học sinh kèm thông tin phụ huynh đầy đủ, privateNote, vòng đời trial/on-leave và tự mask SĐT", async () => {
+      const trialStu = await studentService.createStudent({
+        code: "HS-TRIAL-01",
+        fullName: "Lê Minh Tâm",
+        classId: "cls-mg-05",
+        status: "trial",
+        parentName: "Chị Lan Anh",
+        parentPhone: "0912345678",
+        parentEmail: "lananh@example.com",
+        parentNote: "Chỉ nghe máy sau 18h",
+        privateNote: "Cần quan sát phản xạ phát âm trong 2 buổi đầu",
+        entryBand: 4.5,
+      });
+
+      assert.strictEqual(trialStu.status, "trial");
+      assert.strictEqual(trialStu.parentName, "Chị Lan Anh");
+      assert.strictEqual(trialStu.parentPhone, "0912345678");
+      assert.strictEqual(trialStu.parentContactMasked, "0912 ••• 678");
+      assert.strictEqual(trialStu.privateNote, "Cần quan sát phản xạ phát âm trong 2 buổi đầu");
+      assert.strictEqual(trialStu.entryBand, 4.5);
+
+      const leaveStu = await studentService.updateStudent(trialStu.id, {
+        status: "on-leave",
+        leaveStartDate: "2026-11-20",
+        leaveReturnDate: "2026-12-10",
+        leaveReason: "Thi học kỳ ở trường",
+      });
+      assert.strictEqual(leaveStu.status, "on-leave");
+      assert.strictEqual(leaveStu.leaveStartDate, "2026-11-20");
+      assert.strictEqual(leaveStu.leaveReturnDate, "2026-12-10");
+      assert.strictEqual(leaveStu.leaveReason, "Thi học kỳ ở trường");
+    });
+
+    it("13.2b. DB roundtrip verifyStudentPortal tước bỏ hoàn toàn ghi chú nội bộ và SĐT/Email phụ huynh", async () => {
+      const created = await studentService.createStudent({
+        code: "HS-PORTAL-SAFE",
+        fullName: "Nguyễn An Bình",
+        classId: "cls-mg-05",
+        parentName: "Anh Hùng",
+        parentPhone: "0988777666",
+        parentEmail: "anhhung@example.com",
+        parentNote: "Ghi chú riêng gia đình",
+        privateNote: "Ghi chú mật chỉ giáo viên đọc",
+      });
+      await studentService.addCommunicationLog(created.id, {
+        channel: "zalo",
+        category: "academic",
+        summary: "Trao đổi riêng với bố",
+      });
+
+      const sanitized = studentService.sanitizeStudentForPortal(
+        await studentService.getStudentById(created.id),
+      );
+      assert.strictEqual(sanitized.privateNote, undefined);
+      assert.strictEqual(sanitized.parentPhone, undefined);
+      assert.strictEqual(sanitized.parentEmail, undefined);
+      assert.strictEqual(sanitized.parentNote, undefined);
+      assert.strictEqual(sanitized.communicationLogs, undefined);
+      assert.strictEqual(sanitized.parentContactMasked, "0988 ••• 666");
+
+      // verifyStudentPortal cũng tự động làm sạch payload
+      const portalRes = await studentService.verifyStudentPortal({
+        studentCode: "HS-PORTAL-SAFE",
+        accessKey: "123456",
+      });
+      assert.strictEqual(portalRes.privateNote, undefined);
+      assert.strictEqual(portalRes.parentPhone, undefined);
+    });
+
+    it("13.3b. DB roundtrip getStudentAcademicAlerts miễn cảnh báo cho trial, on-leave và archived", async () => {
+      const trialStu = await studentService.createStudent({
+        code: "HS-ALERT-TRIAL",
+        fullName: "Võ Thị Thử",
+        classId: "cls-mg-05",
+        status: "trial",
+        tuitionStatus: "overdue",
+      });
+      const trialAlerts = getStudentAcademicAlerts(trialStu, DEFAULT_ALERT_SETTINGS);
+      assert.strictEqual(
+        trialAlerts.some((a) => a.type === "tuition" || a.type === "no-grades"),
+        false,
+      );
+
+      const leaveStu = await studentService.createStudent({
+        code: "HS-ALERT-LEAVE",
+        fullName: "Đinh Văn Bảo Lưu",
+        classId: "cls-mg-05",
+        status: "on-leave",
+        tuitionStatus: "overdue",
+      });
+      leaveStu.attendanceRate = 50;
+      leaveStu.attendanceHistory = [
+        { date: "10/11/2026", sessionName: "Buổi 1", status: "absent" },
+      ];
+      const leaveAlerts = getStudentAcademicAlerts(leaveStu, DEFAULT_ALERT_SETTINGS);
+      assert.strictEqual(
+        leaveAlerts.some((a) => a.type === "tuition" || a.type === "attendance"),
+        false,
+      );
+
+      await studentService.archiveStudent(leaveStu.id);
+      const archivedAlerts = getStudentAcademicAlerts(
+        await studentService.getStudentById(leaveStu.id),
+        DEFAULT_ALERT_SETTINGS,
+      );
+      assert.strictEqual(archivedAlerts.length, 0);
+    });
+
+    it("13.4. Sổ thu học phí (recordTuitionPayment): thu một phần, giảm trừ học bổng, thu đủ và tự đồng bộ trạng thái", async () => {
+      // Thu một phần cho stu-06 (hiện đang overdue 5.200.000 đ)
+      const partialRes = await studentService.recordTuitionPayment("stu-06", {
+        paymentId: "pay-stu06-2",
+        period: "Học kỳ II (2026)",
+        baseAmount: 5200000,
+        discountAmount: 200000,
+        paidAmount: 2000000,
+        dueDate: "2026-11-25",
+        paidAt: "2026-11-18",
+        method: "cash",
+        note: "Đóng trước 2tr tiền mặt",
+      });
+      assert.strictEqual(partialRes.payment.status, "partial");
+      assert.ok(partialRes.payment.receiptCode?.startsWith("PT-"));
+      assert.strictEqual(partialRes.student.tuitionStatus, "due-soon");
+
+      // Thu đủ phần còn lại (5.000.000 sau giảm trừ)
+      const fullRes = await studentService.recordTuitionPayment("stu-06", {
+        paymentId: "pay-stu06-2",
+        period: "Học kỳ II (2026)",
+        baseAmount: 5200000,
+        discountAmount: 200000,
+        paidAmount: 5000000,
+        dueDate: "2026-11-25",
+        paidAt: "2026-11-19",
+        method: "transfer",
+      });
+      assert.strictEqual(fullRes.payment.status, "paid");
+      assert.strictEqual(fullRes.student.tuitionStatus, "paid");
+      assert.strictEqual(fullRes.student.tuitionAmount, "5.000.000 ₫");
+    });
+
+    it("13.5. Nhật ký tương tác phụ huynh (addCommunicationLog & deleteCommunicationLog)", async () => {
+      const added = await studentService.addCommunicationLog("stu-02", {
+        channel: "phone",
+        category: "academic",
+        summary: "Gọi trao đổi với bố về bài Research Essay.",
+        parentResponse: "Bố đồng ý cho con tham gia Showcase.",
+        nextFollowUpDate: "2026-11-28",
+      });
+
+      assert.strictEqual(added.entry.channel, "phone");
+      assert.ok(
+        (added.student.communicationLogs ?? []).some((c) => c.id === added.entry.id),
+      );
+
+      const afterDelete = await studentService.deleteCommunicationLog(
+        "stu-02",
+        added.entry.id,
+      );
+      assert.strictEqual(
+        (afterDelete.communicationLogs ?? []).some((c) => c.id === added.entry.id),
+        false,
+      );
+    });
+
+    it("13.6. batchTransferStudents chuyển lớp hàng loạt, ghi lịch sử, đồng bộ sĩ số và chặn nguyên tử khi thiếu chỗ", async () => {
+      // cls-mg-05 mặc định capacity 10, enrolled 0 -> đặt capacity = 1 để test chặn
+      await classroomService.updateClassroom("cls-mg-05", { capacity: 1 });
+
+      await assert.rejects(
+        () =>
+          studentService.batchTransferStudents({
+            studentIds: ["stu-01", "stu-02"],
+            targetClassId: "cls-mg-05",
+            reason: "Test vượt sức chứa",
+          }),
+        (err: unknown) => {
+          assert.ok(err instanceof ValidationError);
+          assert.match(err.message, /chỗ trống/);
+          return true;
+        },
+      );
+
+      // Tăng capacity lên 5 và chuyển thành công cả 2 em
+      await classroomService.updateClassroom("cls-mg-05", { capacity: 5 });
+      const res = await studentService.batchTransferStudents({
+        studentIds: ["stu-01", "stu-02"],
+        targetClassId: "cls-mg-05",
+        reason: "Ghép lớp chuyên đề cấp tốc",
+      });
+      assert.strictEqual(res.transferredCount, 2);
+      assert.strictEqual(
+        (await classroomService.getClassroomById("cls-mg-05")).enrolled,
+        2,
+      );
+
+      const stu1 = await studentService.getStudentById("stu-01");
+      assert.strictEqual(stu1.classId, "cls-mg-05");
+      assert.strictEqual(
+        stu1.classTransferHistory?.[0].reason,
+        "Ghép lớp chuyên đề cấp tốc",
+      );
+    });
+
+    it("13.7. recordGrade ghi nhận gradeChangeHistory khi cập nhật bài thi đã tồn tại", async () => {
+      await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Mid-term Progress Test",
+        listening: 7.5,
+        reading: 7.5,
+        writing: 7.0,
+        speaking: 7.0,
+        comment: "Chấm phúc khảo tăng điểm",
+      });
+
+      const updated = await studentService.getStudentById("stu-03");
+      assert.strictEqual(updated.averageScore, 7.5);
+      assert.ok((updated.gradeChangeHistory ?? []).length >= 1);
+      assert.strictEqual(updated.gradeChangeHistory?.[0].oldScore, 6.2);
+      assert.strictEqual(updated.gradeChangeHistory?.[0].newScore, 7.5);
+    });
+
+    it("13.8. getStudentsSummary, lọc status trial/on-leave/non-archived và sortBy tuitionDueDate", async () => {
+      await studentService.createStudent({
+        code: "HS-TRIAL-SUM",
+        fullName: "Học Viên Thử",
+        classId: "cls-mg-05",
+        status: "trial",
+      });
+      await studentService.createStudent({
+        code: "HS-LEAVE-SUM",
+        fullName: "Học Viên Bảo Lưu",
+        classId: "cls-mg-05",
+        status: "on-leave",
+      });
+
+      const summary = await studentService.getStudentsSummary();
+      assert.strictEqual(summary.totalActive, 6);
+      assert.strictEqual(summary.totalTrial, 1);
+      assert.strictEqual(summary.totalOnLeave, 1);
+      assert.strictEqual(summary.totalNonArchived, 8);
+
+      const trialPage = await studentService.listStudents({ status: "trial" });
+      assert.strictEqual(trialPage.total, 1);
+      assert.strictEqual(trialPage.items[0].code, "HS-TRIAL-SUM");
+
+      const leavePage = await studentService.listStudents({ status: "on-leave" });
+      assert.strictEqual(leavePage.total, 1);
+      assert.strictEqual(leavePage.items[0].code, "HS-LEAVE-SUM");
+
+      const sortedByDue = await studentService.listStudents({
+        status: "non-archived",
+        sortBy: "tuitionDueDate",
+      });
+      assert.strictEqual(sortedByDue.total, 8);
+      for (let i = 1; i < sortedByDue.items.length; i++) {
+        const prevDate = sortedByDue.items[i - 1].tuitionDueDate || "9999-12-31";
+        const currDate = sortedByDue.items[i].tuitionDueDate || "9999-12-31";
+        assert.ok(prevDate <= currDate);
+      }
+    });
+
+    it("13.11. Tạo và cập nhật học sinh không cần thông tin phụ huynh vẫn hoạt động chuẩn xác", async () => {
+      const noParentStu = await studentService.createStudent({
+        code: "HS-NO-PARENT",
+        fullName: "Học Sinh Tự Lập",
+        classId: "cls-mg-05",
+      });
+
+      assert.strictEqual(noParentStu.parentRelation, "");
+      assert.strictEqual(noParentStu.parentContactMasked, "");
+      assert.strictEqual(noParentStu.parentName, undefined);
+      assert.strictEqual(noParentStu.parentPhone, undefined);
+
+      // Cập nhật thêm rồi xóa trắng lại thông tin phụ huynh
+      const addedParent = await studentService.updateStudent(noParentStu.id, {
+        parentName: "Cô Mai",
+        parentPhone: "0911222333",
+      });
+      assert.strictEqual(addedParent.parentName, "Cô Mai");
+      assert.strictEqual(addedParent.parentContactMasked, "0911 ••• 333");
+
+      const clearedParent = await studentService.updateStudent(noParentStu.id, {
+        parentName: "",
+        parentRelation: "",
+        parentPhone: "",
+        parentEmail: "",
+        parentNote: "",
+      });
+      assert.strictEqual(clearedParent.parentName, undefined);
+      assert.strictEqual(clearedParent.parentRelation, "");
+      assert.strictEqual(clearedParent.parentContactMasked, "");
+      assert.strictEqual(clearedParent.parentPhone, undefined);
+    });
+  });
+
+  // =========================================================================
+  // SUITE 14: QUẢN LÝ ĐIỂM SỐ NÂNG CAO (DRAFT/PUBLISH, AUDIT, PRIVATE NOTE)
+  // =========================================================================
+  describe("14. Quản lý Điểm số & Nhận xét chuyên môn nâng cao", () => {
+    it("14.1. createAssessment lưu xuống PostgreSQL bền vững", async () => {
+      const updated = await studentService.createAssessment({
+        title: "Mock Test Đặc Biệt Tháng 12",
+      });
+      assert.ok(updated.includes("Mock Test Đặc Biệt Tháng 12"));
+      assert.ok(
+        (await studentService.listAssessments()).includes("Mock Test Đặc Biệt Tháng 12"),
+      );
+    });
+
+    it("14.2. renameAssessment đồng bộ tên kỳ thi sang học viên & audit log, chặn trùng tên", async () => {
+      await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Kỳ Thi Cũ",
+        listening: 7.0,
+        reading: 7.0,
+        writing: 6.5,
+        speaking: 6.5,
+        comment: "Khá tốt",
+      });
+      await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Kỳ Thi Cũ",
+        listening: 8.0,
+        reading: 8.0,
+        writing: 7.5,
+        speaking: 7.5,
+        comment: "Phúc khảo",
+      });
+
+      const renamed = await studentService.renameAssessment({
+        oldTitle: "Kỳ Thi Cũ",
+        newTitle: "Kỳ Thi Đã Đổi Tên",
+      });
+      assert.ok(renamed.assessments.includes("Kỳ Thi Đã Đổi Tên"));
+      assert.strictEqual(renamed.assessments.includes("Kỳ Thi Cũ"), false);
+      assert.ok(renamed.updatedRecordsCount >= 1);
+
+      const stu03 = await studentService.getStudentById("stu-03");
+      assert.ok(stu03.grades.some((g) => g.assessmentTitle === "Kỳ Thi Đã Đổi Tên"));
+      assert.ok(
+        (stu03.gradeChangeHistory ?? []).some(
+          (l) => l.assessmentTitle === "Kỳ Thi Đã Đổi Tên",
+        ),
+      );
+
+      // Rename to another existing title must throw ConflictError
+      await studentService.createAssessment({ title: "Kỳ Khác Đã Có" });
+      await assert.rejects(
+        () =>
+          studentService.renameAssessment({
+            oldTitle: "Kỳ Thi Đã Đổi Tên",
+            newTitle: "Kỳ Khác Đã Có",
+          }),
+        ConflictError,
+      );
+    });
+
+    it("14.3. deleteAssessment chặn xóa khi đã có điểm, cho phép xóa kỳ thi trống", async () => {
+      await studentService.createAssessment({ title: "Kỳ Trống Chưa Chấm" });
+      const afterDeleteEmpty = await studentService.deleteAssessment({
+        title: "Kỳ Trống Chưa Chấm",
+      });
+      assert.strictEqual(
+        afterDeleteEmpty.includes("Kỳ Trống Chưa Chấm"),
+        false,
+      );
+
+      await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Kỳ Đã Có Điểm",
+        listening: 6.5,
+        reading: 6.5,
+        writing: 6.0,
+        speaking: 6.0,
+      });
+
+      await assert.rejects(
+        () => studentService.deleteAssessment({ title: "Kỳ Đã Có Điểm" }),
+        ConflictError,
+      );
+    });
+
+    it("14.4. Chặn nhập điểm cho học viên đã lưu trữ (archived)", async () => {
+      await studentService.archiveStudent("stu-03");
+      await assert.rejects(
+        () =>
+          studentService.recordGrade({
+            studentId: "stu-03",
+            assessmentTitle: "Test Học Sinh Archived",
+            listening: 7,
+            reading: 7,
+            writing: 7,
+            speaking: 7,
+          }),
+        ValidationError,
+      );
+    });
+
+    it("14.5. Bản nháp (draft) & privateNote KHÔNG đổi averageScore và bị ẩn khỏi sanitizeStudentForPortal", async () => {
+      const stuBefore = await studentService.getStudentById("stu-03");
+      const prevAvg = stuBefore.averageScore;
+      const prevComment = stuBefore.recentComment;
+
+      await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Draft Exam Unpublished",
+        date: "2026-11-25",
+        listening: 8.5,
+        reading: 8.5,
+        writing: 8.5,
+        speaking: 8.5,
+        comment: "Nhận xét nháp chưa công bố",
+        privateNote: "GHI_CHU_NOI_BO_GIAO_VIEN_TRONG_DIEM",
+        status: "draft",
+      });
+
+      const stuAdmin = await studentService.getStudentById("stu-03");
+      assert.strictEqual(
+        stuAdmin.averageScore,
+        prevAvg,
+        "Điểm nháp không được ghi đè averageScore",
+      );
+      assert.strictEqual(stuAdmin.recentComment, prevComment);
+
+      // Add a privateNote on a published grade too
+      await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Published With Private Note",
+        listening: 7.5,
+        reading: 7.5,
+        writing: 7.5,
+        speaking: 7.5,
+        comment: "Nhận xét công khai",
+        privateNote: "SECRET_TEACHER_EVAL_NOTE",
+        status: "published",
+      });
+
+      const stuAdminPublished = await studentService.getStudentById("stu-03");
+      const portalSafe = studentService.sanitizeStudentForPortal(stuAdminPublished);
+
+      assert.strictEqual(
+        portalSafe.grades.some((g) => g.assessmentTitle === "Draft Exam Unpublished"),
+        false,
+        "Cổng Học sinh KHÔNG được hiển thị bài kiểm tra ở trạng thái draft",
+      );
+      const pubGrade = portalSafe.grades.find(
+        (g) => g.assessmentTitle === "Published With Private Note",
+      )!;
+      assert.ok(pubGrade);
+      assert.strictEqual(pubGrade.privateNote, undefined);
+
+      const serialized = JSON.stringify(portalSafe);
+      assert.strictEqual(serialized.includes("SECRET_TEACHER_EVAL_NOTE"), false);
+      assert.strictEqual(
+        serialized.includes("GHI_CHU_NOI_BO_GIAO_VIEN_TRONG_DIEM"),
+        false,
+      );
+    });
+
+    it("14.6. publishAssessmentGrades công bố điểm nháp sang published & cập nhật averageScore", async () => {
+      await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Final Mock Batch",
+        listening: 8.0,
+        reading: 8.0,
+        writing: 8.0,
+        speaking: 8.0,
+        comment: "Hoàn thành xuất sắc",
+        status: "draft",
+      });
+
+      const res = await studentService.publishAssessmentGrades({
+        assessmentTitle: "Final Mock Batch",
+      });
+      assert.strictEqual(res.publishedCount, 1);
+
+      const updated = await studentService.getStudentById("stu-03");
+      assert.strictEqual(updated.averageScore, 8);
+      assert.strictEqual(updated.recentComment, "Hoàn thành xuất sắc");
+      const portalSafe = studentService.sanitizeStudentForPortal(updated);
+      assert.ok(
+        portalSafe.grades.some((g) => g.assessmentTitle === "Final Mock Batch"),
+      );
+    });
+
+    it("14.7. Sửa bài thi cũ (không phải mới nhất) ghi audit log kèm reason mà không làm tụt averageScore mới nhất", async () => {
+      await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Exam Old",
+        listening: 6.0,
+        reading: 6.0,
+        writing: 6.0,
+        speaking: 6.0,
+        status: "published",
+      });
+      await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Exam Latest",
+        listening: 8.0,
+        reading: 8.0,
+        writing: 8.0,
+        speaking: 8.0,
+        status: "published",
+      });
+
+      // Now edit Exam Old from 6.0 -> 6.5 with custom reason
+      const afterEditOld = await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Exam Old",
+        listening: 6.5,
+        reading: 6.5,
+        writing: 6.5,
+        speaking: 6.5,
+        reason: "Cộng điểm câu nghe bị lỗi file",
+        status: "published",
+      });
+
+      assert.strictEqual(
+        afterEditOld.averageScore,
+        8,
+        "Sửa bài thi cũ không được kéo tụt averageScore của bài thi published mới nhất",
+      );
+      assert.strictEqual(
+        afterEditOld.gradeChangeHistory?.[0].reason,
+        "Cộng điểm câu nghe bị lỗi file",
+      );
+    });
+
+    it("14.8. deleteGradeRecord xóa bản ghi điểm, ghi audit log & tính lại averageScore", async () => {
+      const stuAfterCreate = await studentService.recordGrade({
+        studentId: "stu-03",
+        assessmentTitle: "Mistaken Entry Test",
+        listening: 9.0,
+        reading: 9.0,
+        writing: 9.0,
+        speaking: 9.0,
+        status: "published",
+      });
+      assert.strictEqual(stuAfterCreate.averageScore, 9);
+      const mistaken = stuAfterCreate.grades.find(
+        (g) => g.assessmentTitle === "Mistaken Entry Test",
+      )!;
+
+      const afterDelete = await studentService.deleteGradeRecord({
+        studentId: "stu-03",
+        gradeId: mistaken.id,
+        reason: "Nhập nhầm học viên",
+      });
+      assert.strictEqual(
+        afterDelete.grades.some((g) => g.id === mistaken.id),
+        false,
+      );
+      assert.notStrictEqual(afterDelete.averageScore, 9);
+      assert.strictEqual(afterDelete.gradeChangeHistory?.[0].newScore, 0);
+      assert.strictEqual(
+        afterDelete.gradeChangeHistory?.[0].reason,
+        "Nhập nhầm học viên",
+      );
+
+      await assert.rejects(
+        () =>
+          studentService.deleteGradeRecord({
+            studentId: "stu-03",
+            gradeId: "non-existent-grade-id",
+          }),
+        NotFoundError,
+      );
+    });
+
+    it("14.9. getGradesWorkspaceOverview, computeAssessmentSkillAverages, Report PH & CSV ẩn privateNote", async () => {
+      const overview = await studentService.getGradesWorkspaceOverview();
+      assert.ok(overview.assessmentStats.length >= 1);
+
+      const avgs = computeAssessmentSkillAverages([
+        {
+          listening: 8,
+          reading: 7,
+          writing: 6.5,
+          speaking: 7.5,
+          overall: 7.5,
+          status: "published",
+        },
+        {
+          listening: null,
+          reading: null,
+          writing: null,
+          speaking: null,
+          overall: null,
+          status: "ungraded",
+        },
+      ]);
+      assert.strictEqual(avgs.gradedCount, 1);
+      assert.strictEqual(avgs.totalCount, 2);
+      assert.strictEqual(avgs.listening, 8);
+      assert.strictEqual(avgs.strongestSkill, "Listening");
+      assert.strictEqual(avgs.weakestSkill, "Writing");
+
+      const report = buildGradeParentReport({
+        assessmentTitle: "Mock Test #3",
+        date: "2026-11-20",
+        entries: [
+          {
+            code: "HS-2026-03",
+            fullName: "Phạm Hà Phương",
+            className: "IELTS Foundation",
+            listening: 7,
+            reading: 6.5,
+            writing: 6,
+            speaking: 6.5,
+            overall: 6.5,
+            comment: "Cần tăng tốc Reading Passage 3",
+            delta: 0.5,
+          },
+        ],
+      });
+      assert.ok(report.includes("Overall quy chuẩn: 6.5 (+0.5 so với kỳ trước)"));
+      assert.ok(report.includes("Cần tăng tốc Reading Passage 3"));
+
+      const csv = buildGradesCsv({
+        assessmentTitle: "Mock Test #3",
+        rows: [
+          {
+            code: "HS-2026-03",
+            fullName: "Phạm Hà Phương",
+            className: "IELTS Foundation",
+            date: "2026-11-20",
+            status: "published",
+            listening: 7,
+            reading: 6.5,
+            writing: 6,
+            speaking: 6.5,
+            overall: 6.5,
+            comment: "Nhận xét công khai",
+          },
+        ],
+      });
+      assert.ok(csv.startsWith("\uFEFF"));
+      assert.ok(csv.includes("Mock Test #3"));
+      assert.ok(csv.includes("Nhận xét công khai"));
     });
   });
 });

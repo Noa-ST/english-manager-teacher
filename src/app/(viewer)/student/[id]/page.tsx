@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { notFound } from "next/navigation";
 import { connection } from "next/server";
 
 import { StudentPortalView } from "@/components/viewer/student-portal-view";
@@ -13,10 +14,16 @@ async function StudentByIdGuard({
   await connection();
   const session = await requireStudent();
   const { id } = await params;
+  let decodedCode: string;
+  try {
+    decodedCode = decodeURIComponent(id);
+  } catch {
+    notFound();
+  }
   return (
     <StudentPortalView
       session={session}
-      initialStudentCode={decodeURIComponent(id)}
+      initialStudentCode={decodedCode}
     />
   );
 }

@@ -59,3 +59,33 @@ export function removeVietnameseTones(str: string): string {
     .toLowerCase()
     .trim();
 }
+
+/**
+ * Chuyển đổi YouTube / Vimeo URL thành embed iframe URL an toàn (youtube-nocookie)
+ */
+export function getYoutubeEmbedUrl(url?: string | null): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+
+  // Pattern: youtube.com/watch?v=ID or youtu.be/ID or youtube.com/embed/ID
+  const matchWatch = trimmed.match(
+    /(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i,
+  );
+  if (matchWatch && matchWatch[1]) {
+    return `https://www.youtube-nocookie.com/embed/${matchWatch[1]}`;
+  }
+
+  // Pattern: vimeo.com/ID
+  const matchVimeo = trimmed.match(/vimeo\.com\/([0-9]+)/i);
+  if (matchVimeo && matchVimeo[1]) {
+    return `https://player.vimeo.com/video/${matchVimeo[1]}`;
+  }
+
+  // If already an embed or direct https mp4 link
+  if (trimmed.startsWith("https://") || trimmed.startsWith("http://")) {
+    return trimmed;
+  }
+
+  return null;
+}

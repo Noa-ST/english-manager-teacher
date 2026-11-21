@@ -113,7 +113,7 @@ export function studentRoute<TContext extends object = RouteContext>(
 ): Handler<TContext> {
   return async (request, context) => {
     try {
-      const session = await requireStudentApi();
+      const session = await requireStudentApi(request);
       return await handler(request, { ...context, session });
     } catch (error) {
       return fail(error);

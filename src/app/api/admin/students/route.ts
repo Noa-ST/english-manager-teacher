@@ -34,6 +34,10 @@ export const POST = adminRoute(async (request) => {
         const result = await studentService.batchCreateStudents(body);
         return ok(result, { status: 201 });
       }
+      if (body.action === "batch-transfer") {
+        const result = await studentService.batchTransferStudents(body);
+        return ok(result);
+      }
     }
     if (Array.isArray(body)) {
       const result = await studentService.batchCreateStudents(body);

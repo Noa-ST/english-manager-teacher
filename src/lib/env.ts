@@ -16,6 +16,7 @@ const serverEnvSchema = z.object({
 
   // Database
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+  TEST_DATABASE_URL: z.string().trim().default(""),
 
   // Auth
   AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 characters"),

@@ -1,8 +1,10 @@
 import { redirect } from "next/navigation";
 
 import { getUserProfile } from "@/lib/rbac";
+import { verifyStudentPortalToken } from "@/lib/student-token";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { ForbiddenError, UnauthorizedError } from "@/services/errors";
+import * as studentService from "@/services/student.service";
 import type { SessionUser } from "@/types";
 
 /**
@@ -68,12 +70,41 @@ export async function requireStudent(): Promise<SessionUser> {
   return session;
 }
 
-/** For Route Handlers: throws 401 if unauthenticated, 403 if not STUDENT/ADMIN. */
-export async function requireStudentApi(): Promise<SessionUser> {
+/** For Route Handlers: throws 401 if unauthenticated, 403 if not STUDENT/ADMIN. Also accepts signed Portal JWT Bearer token. */
+export async function requireStudentApi(request?: Request): Promise<SessionUser> {
   const session = await getSession();
-  if (!session) throw new UnauthorizedError("Vui lòng đăng nhập để xem thông tin học tập.");
-  if (session.role !== "student" && session.role !== "admin") {
-    throw new ForbiddenError("Tài khoản không có quyền truy cập khu vực học sinh.");
+  if (session) {
+    if (session.role !== "student" && session.role !== "admin") {
+      throw new ForbiddenError("Tài khoản không có quyền truy cập khu vực học sinh.");
+    }
+    return session;
   }
-  return session;
+
+  const authHeader = request?.headers.get("authorization") ?? "";
+  if (authHeader.toLowerCase().startsWith("bearer ")) {
+    const token = authHeader.slice(7).trim();
+    const verified = token ? await verifyStudentPortalToken(token) : null;
+    if (verified) {
+      const student = await studentService
+        .getStudentById(verified.studentId)
+        .catch(() =>
+          verified.studentCode
+            ? studentService.getStudentById(verified.studentCode).catch(() => null)
+            : null,
+        );
+      if (!student || student.status === "archived" || student.deletedAt) {
+        throw new ForbiddenError("Hồ sơ học sinh đã được lưu trữ hoặc không còn hoạt động.");
+      }
+      return {
+        id: student.id,
+        role: "student",
+        label: student.code,
+        fullName: student.fullName,
+        studentId: student.id,
+        studentCode: student.code,
+      };
+    }
+  }
+
+  throw new UnauthorizedError("Vui lòng đăng nhập để xem thông tin học tập.");
 }

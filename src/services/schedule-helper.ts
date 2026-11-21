@@ -545,3 +545,262 @@ export function matchStandardRoom(
   if (shortMatch) return shortMatch;
   return undefined;
 }
+
+/** Normalize a room string by extracting text before "·" and collapsing whitespace. */
+export function normalizeRoomKey(room?: string): string {
+  if (!room) return "";
+  return room.split("·")[0].replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+export interface SessionConflictEvaluation {
+  hasConflict: boolean;
+  type: "none" | "room" | "class" | "teacher";
+  message?: string;
+  conflictingSession?: WeeklyClassSession;
+}
+
+/**
+ * Evaluates a candidate recurring weekly session against existing sessions.
+ * Enforces strict single-teacher rule: blocks BOTH room collisions AND teacher time overlaps.
+ */
+export function evaluateWeeklySessionConflict(
+  candidate: {
+    dayOfWeek: number;
+    startTime: string;
+    endTime: string;
+    room: string;
+    classCode: string;
+  },
+  existingSessions: WeeklyClassSession[],
+  excludeSessionId?: string,
+): SessionConflictEvaluation {
+  const overlapping = existingSessions.filter((s) => {
+    if (excludeSessionId && s.id === excludeSessionId) return false;
+    return (
+      s.dayOfWeek === candidate.dayOfWeek &&
+      isTimeOverlapping(s.startTime, s.endTime, candidate.startTime, candidate.endTime)
+    );
+  });
+
+  if (overlapping.length === 0) {
+    return { hasConflict: false, type: "none" };
+  }
+
+  const candRoomKey = normalizeRoomKey(candidate.room);
+  const candClassCode = candidate.classCode.trim().toUpperCase();
+
+  const roomConflict = overlapping.find(
+    (s) => candRoomKey !== "" && normalizeRoomKey(s.room) === candRoomKey,
+  );
+  if (roomConflict) {
+    return {
+      hasConflict: true,
+      type: "room",
+      conflictingSession: roomConflict,
+      message: `Xung đột phòng học: "${candidate.room.split("·")[0].trim()}" đã có ca của lớp ${roomConflict.classCode} (${roomConflict.startTime} – ${roomConflict.endTime}) vào ${roomConflict.dayLabel}.`,
+    };
+  }
+
+  const classConflict = overlapping.find(
+    (s) => s.classCode.trim().toUpperCase() === candClassCode,
+  );
+  if (classConflict) {
+    return {
+      hasConflict: true,
+      type: "class",
+      conflictingSession: classConflict,
+      message: `Xung đột lớp học: Lớp ${candClassCode} đã có ca khác (${classConflict.startTime} – ${classConflict.endTime}) vào ${classConflict.dayLabel}.`,
+    };
+  }
+
+  const teacherConflict = overlapping[0];
+  return {
+    hasConflict: true,
+    type: "teacher",
+    conflictingSession: teacherConflict,
+    message: `Trùng giờ dạy của giáo viên: Giáo viên đang có ca lớp ${teacherConflict.classCode} (${teacherConflict.startTime} – ${teacherConflict.endTime}) tại ${teacherConflict.room.split("·")[0].trim()} vào ${teacherConflict.dayLabel}.`,
+  };
+}
+
+/** Recomputes `hasConflict` across every weekly session cleanly after create/update/delete. */
+export function recomputeWeeklySessionConflicts(
+  sessions: WeeklyClassSession[],
+): void {
+  for (let i = 0; i < sessions.length; i++) {
+    const a = sessions[i];
+    let overlaps = false;
+    for (let j = 0; j < sessions.length; j++) {
+      if (i === j) continue;
+      const b = sessions[j];
+      if (
+        a.dayOfWeek === b.dayOfWeek &&
+        isTimeOverlapping(a.startTime, a.endTime, b.startTime, b.endTime)
+      ) {
+        overlaps = true;
+        break;
+      }
+    }
+    a.hasConflict = overlaps;
+  }
+}
+
+export interface ParsedScheduleInterval {
+  dayNumber: number;
+  dayLabel: string;
+  startTime: string;
+  endTime: string;
+}
+
+export interface ScheduleConflictResult {
+  hasConflict: boolean;
+  conflicts: Array<{
+    dayNumber: number;
+    dayLabel: string;
+    startTime: string;
+    endTime: string;
+    existingClassId: string;
+    existingClassCode: string;
+    existingClassName: string;
+    existingRoom: string;
+    existingStartTime: string;
+    existingEndTime: string;
+  }>;
+}
+
+function normalizeHmToken(raw: string): string | null {
+  const m = raw.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+  return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+}
+
+function extractTimeRangeFromText(text: string): { startTime: string; endTime: string } | null {
+  const rangeMatch = text.match(/(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})/);
+  if (rangeMatch) {
+    const startTime = normalizeHmToken(rangeMatch[1]);
+    const endTime = normalizeHmToken(rangeMatch[2]);
+    if (startTime && endTime && toMinutes(startTime) < toMinutes(endTime)) {
+      return { startTime, endTime };
+    }
+  }
+  const singleMatch = text.match(/(\d{1,2}:\d{2})/);
+  if (singleMatch) {
+    const startTime = normalizeHmToken(singleMatch[1]);
+    if (startTime) {
+      const endMin = Math.min(23 * 60 + 45, toMinutes(startTime) + 120);
+      return { startTime, endTime: toTimeString(endMin) };
+    }
+  }
+  return null;
+}
+
+/**
+ * Parses a scheduleSummary string (including custom intervals not in STANDARD_TIME_SLOTS)
+ * into explicit day + start/end intervals for backend session sync & conflict detection.
+ */
+export function parseScheduleSummaryToIntervals(
+  scheduleSummary: string,
+  slots: TimeSlotDef[] = STANDARD_TIME_SLOTS,
+): ParsedScheduleInterval[] {
+  if (!scheduleSummary?.trim()) return [];
+  const intervals: ParsedScheduleInterval[] = [];
+
+  if (scheduleSummary.includes("·")) {
+    const [daysPart, timePart] = scheduleSummary.split("·");
+    const explicitRange = extractTimeRangeFromText(timePart);
+    const matchedSlot = findMatchingSlot(timePart, slots);
+    const range = explicitRange ?? (matchedSlot ? { startTime: matchedSlot.startTime, endTime: matchedSlot.endTime } : null);
+    if (range) {
+      for (const token of daysPart.split(/[,&]/)) {
+        const dayNum = parseDayNumber(token);
+        if (dayNum) {
+          const dayDef = DAYS_OF_WEEK.find((d) => d.dayNumber === dayNum);
+          intervals.push({
+            dayNumber: dayNum,
+            dayLabel: dayDef?.fullLabel ?? `Thứ ${dayNum}`,
+            startTime: range.startTime,
+            endTime: range.endTime,
+          });
+        }
+      }
+      if (intervals.length > 0) return intervals;
+    }
+  }
+
+  const pendingDays: number[] = [];
+  for (const token of scheduleSummary.split(/[,&;]/)) {
+    const dayNum = parseDayNumber(token);
+    if (!dayNum) continue;
+    const paren = token.match(/\((.*?)\)/)?.[1] ?? token;
+    const explicitRange = extractTimeRangeFromText(paren);
+    const matchedSlot = findMatchingSlot(paren, slots);
+    const range = explicitRange ?? (matchedSlot ? { startTime: matchedSlot.startTime, endTime: matchedSlot.endTime } : null);
+    if (range) {
+      const daysToEmit = [...pendingDays, dayNum];
+      pendingDays.length = 0;
+      for (const d of daysToEmit) {
+        const dayDef = DAYS_OF_WEEK.find((item) => item.dayNumber === d);
+        intervals.push({
+          dayNumber: d,
+          dayLabel: dayDef?.fullLabel ?? `Thứ ${d}`,
+          startTime: range.startTime,
+          endTime: range.endTime,
+        });
+      }
+    } else {
+      pendingDays.push(dayNum);
+    }
+  }
+
+  return intervals;
+}
+
+/**
+ * Server-side schedule conflict validator across all active/upcoming classes.
+ * Prevents teacher double-booking (overlapping time window on the same day of week).
+ */
+export function detectScheduleConflicts(
+  scheduleSummary: string,
+  _room: string,
+  existingClasses: ClassroomGroup[],
+  excludeClassId?: string,
+  slots: TimeSlotDef[] = STANDARD_TIME_SLOTS,
+): ScheduleConflictResult {
+  const incoming = parseScheduleSummaryToIntervals(scheduleSummary, slots);
+  const conflicts: ScheduleConflictResult["conflicts"] = [];
+  if (incoming.length === 0) {
+    return { hasConflict: false, conflicts };
+  }
+
+  for (const cls of existingClasses) {
+    if (cls.status === "archived" || cls.status === "completed") continue;
+    if (excludeClassId && cls.id === excludeClassId) continue;
+
+    const existingIntervals = parseScheduleSummaryToIntervals(cls.scheduleSummary, slots);
+    for (const inc of incoming) {
+      for (const ex of existingIntervals) {
+        if (
+          inc.dayNumber === ex.dayNumber &&
+          isTimeOverlapping(inc.startTime, inc.endTime, ex.startTime, ex.endTime)
+        ) {
+          conflicts.push({
+            dayNumber: inc.dayNumber,
+            dayLabel: inc.dayLabel,
+            startTime: inc.startTime,
+            endTime: inc.endTime,
+            existingClassId: cls.id,
+            existingClassCode: cls.code,
+            existingClassName: cls.name,
+            existingRoom: cls.room,
+            existingStartTime: ex.startTime,
+            existingEndTime: ex.endTime,
+          });
+        }
+      }
+    }
+  }
+
+  return { hasConflict: conflicts.length > 0, conflicts };
+}
