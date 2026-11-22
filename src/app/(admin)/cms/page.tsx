@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Award,
   BookOpen,
@@ -12,7 +12,6 @@ import {
   Megaphone,
   Plus,
   RefreshCw,
-  Sparkles,
 } from "lucide-react";
 import type {
   AdminStudentRecord,
@@ -23,12 +22,10 @@ import type {
   ResourceFileItem,
   ResourceFolder,
   StudentProjectItem,
-  TeacherProfile,
 } from "@/services/classroom-data";
 import { computeCmsSummaryStats, type CmsTab } from "@/services/cms-helpers";
 import { apiRequest } from "@/lib/api-client";
 import { CmsAnnouncementsTab } from "@/components/admin/cms/cms-announcements-tab";
-import { CmsBrandStudioTab } from "@/components/admin/cms/cms-brand-studio-tab";
 import { CmsHallOfFameTab } from "@/components/admin/cms/cms-hall-of-fame-tab";
 import { CmsKpiStrip } from "@/components/admin/cms/cms-kpi-strip";
 import { CmsPodcastsTab } from "@/components/admin/cms/cms-podcasts-tab";
@@ -45,7 +42,6 @@ const VALID_TABS: CmsTab[] = [
   "hall-of-fame",
   "projects",
   "resources",
-  "brand",
 ];
 
 interface CmsAdminPayload {
@@ -57,30 +53,20 @@ interface CmsAdminPayload {
   folders?: ResourceFolder[];
   classrooms?: ClassroomGroup[];
   students?: AdminStudentRecord[];
-  teacherBrand?: TeacherProfile;
 }
-
-const EMPTY_TEACHER_PROFILE: TeacherProfile = {
-  name: "",
-  title: "",
-  credentials: [],
-  slogan: "",
-  shortBio: "",
-  philosophy: "",
-  experienceYears: 0,
-  totalStudents: 0,
-  bandAchievementRate: "",
-  email: "",
-  avatarUrl: "/images/teacher-avatar.jpg",
-  officeHours: "",
-  location: "",
-  socials: [],
-};
 
 function AdminCmsContent() {
   const { toast } = useToast();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const initialTabParam = searchParams.get("tab") as CmsTab | null;
+
+  React.useEffect(() => {
+    if (initialTabParam === "brand") {
+      router.replace("/settings?tab=brand");
+    }
+  }, [initialTabParam, router]);
+
   const [activeTab, setActiveTab] = React.useState<CmsTab>(() =>
     initialTabParam && VALID_TABS.includes(initialTabParam)
       ? initialTabParam
@@ -96,9 +82,6 @@ function AdminCmsContent() {
   const [foldersList, setFoldersList] = React.useState<ResourceFolder[]>([]);
   const [classroomsList, setClassroomsList] = React.useState<ClassroomGroup[]>([]);
   const [studentsList, setStudentsList] = React.useState<AdminStudentRecord[]>([]);
-  const [teacherBrand, setTeacherBrand] =
-    React.useState<TeacherProfile>(EMPTY_TEACHER_PROFILE);
-  const [brandRevision, setBrandRevision] = React.useState(0);
 
   const [isLoading, setIsLoading] = React.useState(true);
   const [isRefreshing, setIsRefreshing] = React.useState(false);
@@ -124,10 +107,6 @@ function AdminCmsContent() {
     if (res.folders) setFoldersList(res.folders);
     if (res.classrooms) setClassroomsList(res.classrooms);
     if (res.students) setStudentsList(res.students);
-    if (res.teacherBrand) {
-      setTeacherBrand(res.teacherBrand);
-      setBrandRevision((r) => r + 1);
-    }
   }, []);
 
   React.useEffect(() => {
@@ -240,11 +219,6 @@ function AdminCmsContent() {
       countLabel: String(resources.length),
       icon: <BookOpen className="size-4" aria-hidden="true" />,
     },
-    {
-      id: "brand",
-      label: "Thương hiệu & Trang chủ",
-      icon: <Sparkles className="size-4" aria-hidden="true" />,
-    },
   ];
 
   const primaryCtaLabels: Partial<Record<CmsTab, string>> = {
@@ -260,39 +234,46 @@ function AdminCmsContent() {
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
-        <div>
+        <div className="min-w-0 flex-1">
           <h1 className="font-heading text-2xl font-bold text-foreground sm:text-3xl">
             Quản trị Nội dung &amp; Thương hiệu (CMS)
           </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Biên tập bản tin, phát hành Podcast, quản lý Bảng vàng (theo điểm đã công bố), duyệt Dự án học sinh và Hồ sơ Thương hiệu trên Cổng công khai.
+          <p className="mt-1 max-w-xl text-sm text-muted-foreground">
+            Biên tập bản tin, phát hành Podcast, quản lý Bảng vàng (theo điểm đã công bố), duyệt Dự án học sinh và Học liệu công khai.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 lg:flex-nowrap lg:justify-end">
           <Button
             variant="outline"
             size="sm"
             render={<Link href="/" />}
             nativeButton={false}
+            className="h-9 shrink-0 px-3 whitespace-nowrap"
           >
             <ExternalLink className="size-3.5" aria-hidden="true" />
             Xem Cổng công khai
           </Button>
           <Button
             variant="outline"
-            size="sm"
+            size="icon"
             onClick={handleRefresh}
             disabled={isRefreshing}
+            title="Làm mới dữ liệu CMS"
+            aria-label="Làm mới dữ liệu CMS"
+            className="size-9 shrink-0"
           >
             <RefreshCw
               className={cn("size-3.5", isRefreshing && "animate-spin")}
               aria-hidden="true"
             />
-            Làm mới
           </Button>
           {primaryCtaLabel && (
-            <Button size="sm" onClick={triggerCreateForActiveTab}>
+            <Button
+              size="sm"
+              onClick={triggerCreateForActiveTab}
+              className="h-9 shrink-0 px-3.5 whitespace-nowrap"
+            >
               <Plus className="size-4" aria-hidden="true" />
               {primaryCtaLabel}
             </Button>
@@ -404,14 +385,6 @@ function AdminCmsContent() {
               classroomsList={classroomsList}
               onResourcesChange={setResources}
               createTrigger={createCounters.resources}
-            />
-          )}
-
-          {activeTab === "brand" && (
-            <CmsBrandStudioTab
-              key={brandRevision}
-              teacherBrand={teacherBrand}
-              onBrandChange={setTeacherBrand}
             />
           )}
         </>

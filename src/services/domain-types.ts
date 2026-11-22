@@ -51,6 +51,14 @@ export {
 } from "./classroom-data";
 import type { TeacherProfile } from "./classroom-data";
 
+export interface BrandThemeColors {
+  primary: string;
+  accent: string;
+  secondary: string;
+  warm: string;
+  highlight: string;
+}
+
 export interface SystemSettingsState extends TeacherProfile {
   currentTerm: string;
   defaultPortalPin: string;
@@ -59,4 +67,5 @@ export interface SystemSettingsState extends TeacherProfile {
   lowAttendanceThresholdPercent: number;
   tuitionReminderDaysBefore: number;
   requirePortalVerification: boolean;
+  brandTheme?: BrandThemeColors;
 }

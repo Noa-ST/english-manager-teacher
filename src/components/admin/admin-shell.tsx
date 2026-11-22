@@ -29,7 +29,11 @@ import { cn } from "cn";
 import { apiRequest } from "@/lib/api-client";
 import { ADMIN_NAV } from "@/lib/routes";
 import type { AdminStudentRecord, ClassroomGroup } from "@/services/domain-types";
-import { SETTINGS_UPDATED_EVENT } from "@/services/settings-helpers";
+import {
+  persistTeacherBrandLocally,
+  readStoredTeacherBrand,
+  SETTINGS_UPDATED_EVENT,
+} from "@/services/settings-helpers";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ModalDialog } from "@/components/ui/dialog";
@@ -80,13 +84,25 @@ function AdminShellInner({ children }: { children: React.ReactNode }) {
   const [notifications, setNotifications] = React.useState<ShellNotification[]>([]);
   const [brandMeta, setBrandMeta] = React.useState<ShellBrandMeta>({
     name: "",
-    avatarUrl: "/images/teacher-avatar.jpg",
+    avatarUrl: "",
     currentTerm: "",
   });
 
   // Sync live brand, term, global search index & notifications from PostgreSQL APIs
   React.useEffect(() => {
     let active = true;
+
+    const cached = readStoredTeacherBrand();
+    if (cached) {
+      Promise.resolve().then(() => {
+        if (!active) return;
+        setBrandMeta((prev) => ({
+          name: cached.name?.trim() ? cached.name : prev.name,
+          avatarUrl: cached.avatarUrl?.trim() ? cached.avatarUrl : prev.avatarUrl,
+          currentTerm: prev.currentTerm,
+        }));
+      });
+    }
 
     apiRequest<Partial<ShellBrandMeta>>("/api/admin/settings")
       .then((res) => {
@@ -96,8 +112,15 @@ function AdminShellInner({ children }: { children: React.ReactNode }) {
           avatarUrl: res.avatarUrl?.trim() ? res.avatarUrl : prev.avatarUrl,
           currentTerm: res.currentTerm?.trim() ? res.currentTerm : prev.currentTerm,
         }));
+        if (res.name || res.avatarUrl) {
+          persistTeacherBrandLocally({
+            ...(cached ?? {}),
+            ...(res.name ? { name: res.name } : {}),
+            ...(res.avatarUrl ? { avatarUrl: res.avatarUrl } : {}),
+          });
+        }
       })
-      .catch(() => {});
+      .catch(() => { });
 
     Promise.allSettled([
       apiRequest<AdminStudentRecord[]>(
@@ -201,7 +224,10 @@ function AdminShellInner({ children }: { children: React.ReactNode }) {
   };
 
   const renderBrandAvatar = () => {
-    const src = brandMeta.avatarUrl || "/images/teacher-avatar.jpg";
+    const src = brandMeta.avatarUrl?.trim();
+    if (!src) {
+      return <div className="size-full animate-pulse bg-muted/80" aria-hidden="true" />;
+    }
     if (src.startsWith("http://") || src.startsWith("https://")) {
       return (
         /* eslint-disable-next-line @next/next/no-img-element */

@@ -190,6 +190,7 @@ model TeacherSetting {
   email                         String
   avatarUrl                     String?  @map("avatar_url")
   socialsJson                   Json?    @map("socials_json")
+  brandThemeJson                Json?    @map("brand_theme_json")
   officeHours                   String
   location                      String
   currentTerm                   String   @default("Học kỳ I · Năm học 2026–2027")

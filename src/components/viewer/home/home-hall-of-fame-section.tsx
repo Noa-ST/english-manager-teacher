@@ -59,7 +59,7 @@ export function HomeHallOfFameSection({
             <div className="mt-5">
               <Button
                 size="default"
-                className="h-9 rounded-full bg-[#243B64] px-5 text-xs font-semibold text-white shadow-xs hover:bg-[#1E3458]"
+                className="h-9 rounded-full bg-primary px-5 text-xs font-semibold text-primary-foreground shadow-xs hover:bg-deep-navy"
                 render={<Link href="/hall-of-fame" />}
                 nativeButton={false}
               >
@@ -129,8 +129,8 @@ export function HomeHallOfFameSection({
                         className={cn(
                           "relative flex size-21 flex-col items-center justify-center overflow-hidden rounded-full border-2 border-[#D9AE54] shadow-xs transition-transform duration-300 group-hover:scale-[1.03] sm:size-22",
                           index % 2 === 0
-                            ? "bg-gradient-to-b from-[#243B64] to-[#1E3458] text-white"
-                            : "bg-gradient-to-b from-[#FFFDF9] to-[#EFE2C6] text-[#243B64]",
+                            ? "bg-gradient-to-b from-primary to-deep-navy text-white"
+                            : "bg-gradient-to-b from-[#FFFDF9] to-warm text-primary",
                         )}
                       >
                         <GraduationCap

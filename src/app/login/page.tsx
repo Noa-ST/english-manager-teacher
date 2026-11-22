@@ -47,14 +47,16 @@ function LoginFormContent() {
   const [resetMode, setResetMode] = React.useState(false);
   const [resetSent, setResetSent] = React.useState(false);
   const [supportEmail, setSupportEmail] = React.useState("");
+  const [teacherName, setTeacherName] = React.useState("");
   const errorSummaryRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
     let active = true;
-    apiRequest<{ teacher?: { email?: string } }>("/api/viewer/overview")
+    apiRequest<{ teacher?: { name?: string; email?: string } }>("/api/viewer/overview")
       .then((res) => {
-        if (!active || !res?.teacher?.email) return;
-        setSupportEmail(res.teacher.email);
+        if (!active || !res?.teacher) return;
+        if (res.teacher.email) setSupportEmail(res.teacher.email);
+        if (res.teacher.name) setTeacherName(res.teacher.name);
       })
       .catch(() => {});
     return () => {
@@ -268,8 +270,9 @@ function LoginFormContent() {
                   Learn English. Grow Together.
                 </p>
                 <p className="mt-2 text-sm leading-relaxed text-[#556075]">
-                  Cùng xây dựng hành trình học tiếng Anh hiệu quả với sự đồng hành của cô Minh Anh.
-                  Không gian học thuật tập trung, minh bạch kết quả và đồng hành cùng sự tiến bộ của
+                  Cùng xây dựng hành trình học tiếng Anh hiệu quả
+                  {teacherName ? ` với sự đồng hành của ${teacherName}` : ""}.
+                  {" "}Không gian học thuật tập trung, minh bạch kết quả và đồng hành cùng sự tiến bộ của
                   từng học viên.
                 </p>
 
@@ -398,7 +401,7 @@ function LoginFormContent() {
                         <div className="leading-relaxed">
                           <p className="font-semibold text-[#1E3458]">Cổng Quản trị Giáo viên</p>
                           <p className="mt-0.5 text-[11px] text-[#556075]">
-                            Dành cho ThS. Nguyễn Minh Anh và quản trị viên quản lý lớp học, điểm danh, chấm bài, CMS &amp; tài liệu.
+                            Dành cho {teacherName || "Giáo viên"} và quản trị viên quản lý lớp học, điểm danh, chấm bài, CMS &amp; tài liệu.
                           </p>
                         </div>
                       </div>
@@ -629,10 +632,10 @@ function LoginFormContent() {
                   <p className="mt-1">
                     Cần hỗ trợ?{" "}
                     <Link
-                      href={supportEmail ? `mailto:${supportEmail}` : "/"}
-                      className="font-semibold text-[#243B64] hover:underline"
+                      href={supportEmail ? `mailto:${supportEmail}` : "/support"}
+                      className="font-semibold text-primary hover:underline"
                     >
-                      Liên hệ ThS. Nguyễn Minh Anh
+                      Liên hệ {teacherName || "Giáo viên"}
                     </Link>
                   </p>
                 </div>

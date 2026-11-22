@@ -5,6 +5,7 @@ import { Check, Copy, FileText, Printer } from "lucide-react";
 
 import { useTodayIso } from "@/lib/use-today-iso";
 import type { AdminStudentRecord } from "@/services/classroom-data";
+import { readStoredTeacherBrand } from "@/services/settings-helpers";
 import {
   buildStudentProgressReportText,
   computeStudentSkillProfile,
@@ -155,8 +156,11 @@ function StudentReportModalInner({
         <div className="print-report-sheet space-y-5 rounded-2xl border border-border bg-white p-6 text-slate-900 shadow-2xs">
           <div className="flex flex-col justify-between gap-2 border-b border-slate-200 pb-4 sm:flex-row sm:items-end">
             <div>
-              <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-[#496B9A]">
-                Academic English &amp; Mentorship · ThS. Nguyễn Minh Anh
+              <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-primary-accent">
+                Academic English &amp; Mentorship
+                {readStoredTeacherBrand()?.name
+                  ? ` · ${readStoredTeacherBrand()?.name}`
+                  : ""}
               </p>
               <h3 className="mt-1 font-heading text-lg font-bold text-[#243B64]">
                 PHIẾU BÁO CÁO TIẾN ĐỘ HỌC TẬP

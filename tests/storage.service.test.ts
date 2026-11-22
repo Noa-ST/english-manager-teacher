@@ -217,6 +217,71 @@ describe("Storage System — Pure Security Validations, Presets & Helpers (Offli
     assert.ok(csv.includes("Tên tệp gốc"));
     assert.ok(csv.includes("Cloudinary") || csv.includes("CLOUDINARY"));
   });
+
+  it("35. extractCloudinaryPublicIdFromUrl bóc tách đúng public_id Cloudinary và bỏ qua link ngoài / ảnh tĩnh", () => {
+    assert.strictEqual(
+      storageService.extractCloudinaryPublicIdFromUrl(
+        "https://res.cloudinary.com/demo/image/upload/v1732291234/english-manager/projects/2026-11/poster-1.webp",
+      ),
+      "english-manager/projects/2026-11/poster-1",
+    );
+    assert.strictEqual(
+      storageService.extractCloudinaryPublicIdFromUrl(
+        "https://res.cloudinary.com/demo/image/upload/c_fill,g_auto,w_256,h_256,f_auto,q_auto/v1732291234/english-manager/avatars/teachers/2026-11/avatar-1.jpg",
+      ),
+      "english-manager/avatars/teachers/2026-11/avatar-1",
+    );
+    assert.strictEqual(
+      storageService.extractCloudinaryPublicIdFromUrl(
+        "english-manager/podcasts/thumbnails/ep1.png",
+      ),
+      "english-manager/podcasts/thumbnails/ep1",
+    );
+    assert.strictEqual(
+      storageService.extractCloudinaryPublicIdFromUrl(
+        "https://images.unsplash.com/photo-1532012164546-f432f2e3777f",
+      ),
+      null,
+    );
+    assert.strictEqual(
+      storageService.extractCloudinaryPublicIdFromUrl("/images/teacher-avatar.jpg"),
+      null,
+    );
+  });
+
+  it("36. extractSupabaseStorageTarget bóc tách đúng bucket & path cho URL Supabase Storage / bare key và bỏ qua link ngoài", () => {
+    const publicTarget = storageService.extractSupabaseStorageTarget(
+      "https://dwurggugjpmmmexjvvee.supabase.co/storage/v1/object/public/english-manager-public/podcasts/2026/11/episode-19.m4a",
+    );
+    assert.deepStrictEqual(publicTarget, {
+      bucket: "english-manager-public",
+      storagePath: "podcasts/2026/11/episode-19.m4a",
+      visibility: "public",
+    });
+
+    const privateTarget = storageService.extractSupabaseStorageTarget(
+      "https://dwurggugjpmmmexjvvee.supabase.co/storage/v1/object/sign/english-manager-private/documents/2026/11/worksheet.pdf?token=abc",
+    );
+    assert.deepStrictEqual(privateTarget, {
+      bucket: "english-manager-private",
+      storagePath: "documents/2026/11/worksheet.pdf",
+      visibility: "private",
+    });
+
+    const bareKey = storageService.extractSupabaseStorageTarget(
+      "podcasts/2026/11/ep-19.mp3",
+    );
+    assert.deepStrictEqual(bareKey, {
+      bucket: "english-manager-public",
+      storagePath: "podcasts/2026/11/ep-19.mp3",
+      visibility: "public",
+    });
+
+    assert.strictEqual(
+      storageService.extractSupabaseStorageTarget("https://example.com/documents/sample.pdf"),
+      null,
+    );
+  });
 });
 
 describe(

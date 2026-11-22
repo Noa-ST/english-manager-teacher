@@ -1,8 +1,295 @@
 import type { SettingsAuditLogEntry, TeacherProfile } from "./classroom-data";
+import type { BrandThemeColors } from "./domain-types";
+
+export type { BrandThemeColors };
 
 export type SettingsAdminTab = "brand" | "operations" | "accounts" | "system";
 
 export const SETTINGS_UPDATED_EVENT = "english-manager:settings-updated";
+export const BRAND_THEME_STORAGE_KEY = "english-manager:brand-theme";
+export const TEACHER_BRAND_STORAGE_KEY = "english-manager:teacher-brand";
+
+export const DEFAULT_BRAND_THEME: BrandThemeColors = {
+  primary: "#243B64",
+  accent: "#496B9A",
+  secondary: "#EAF0FA",
+  warm: "#F7F0E2",
+  highlight: "#E8A18B",
+};
+
+export interface BrandThemePreset {
+  id: string;
+  name: string;
+  subtitle: string;
+  colors: BrandThemeColors;
+}
+
+export const BRAND_THEME_PRESETS: BrandThemePreset[] = [
+  {
+    id: "modern-academic",
+    name: "Modern Academic",
+    subtitle: "Xanh Navy mặc định",
+    colors: DEFAULT_BRAND_THEME,
+  },
+  {
+    id: "oxford-emerald",
+    name: "Oxford Emerald",
+    subtitle: "Xanh lục bảo học thuật",
+    colors: {
+      primary: "#14532D",
+      accent: "#15803D",
+      secondary: "#ECFDF5",
+      warm: "#FEF9EE",
+      highlight: "#D97706",
+    },
+  },
+  {
+    id: "cambridge-burgundy",
+    name: "Cambridge Burgundy",
+    subtitle: "Đỏ rượu vang cổ điển",
+    colors: {
+      primary: "#7F1D1D",
+      accent: "#B91C1C",
+      secondary: "#FEF2F2",
+      warm: "#FDF6EC",
+      highlight: "#D97706",
+    },
+  },
+  {
+    id: "royal-indigo",
+    name: "Royal Indigo",
+    subtitle: "Tím chàm hiện đại",
+    colors: {
+      primary: "#312E81",
+      accent: "#4F46E5",
+      secondary: "#EEF2FF",
+      warm: "#FAF5FF",
+      highlight: "#EC4899",
+    },
+  },
+  {
+    id: "ocean-teal",
+    name: "Ocean Teal",
+    subtitle: "Xanh đại dương thanh lịch",
+    colors: {
+      primary: "#134E4A",
+      accent: "#0F766E",
+      secondary: "#F0FDFA",
+      warm: "#FEFCE8",
+      highlight: "#F97316",
+    },
+  },
+  {
+    id: "warm-slate",
+    name: "Warm Slate",
+    subtitle: "Xám than tối giản",
+    colors: {
+      primary: "#1E293B",
+      accent: "#475569",
+      secondary: "#F1F5F9",
+      warm: "#F8F4EC",
+      highlight: "#E11D48",
+    },
+  },
+];
+
+const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
+
+export function normalizeBrandTheme(
+  raw?: Partial<BrandThemeColors> | null,
+): BrandThemeColors {
+  return {
+    primary:
+      raw?.primary && HEX_COLOR_RE.test(raw.primary)
+        ? raw.primary.toUpperCase()
+        : DEFAULT_BRAND_THEME.primary,
+    accent:
+      raw?.accent && HEX_COLOR_RE.test(raw.accent)
+        ? raw.accent.toUpperCase()
+        : DEFAULT_BRAND_THEME.accent,
+    secondary:
+      raw?.secondary && HEX_COLOR_RE.test(raw.secondary)
+        ? raw.secondary.toUpperCase()
+        : DEFAULT_BRAND_THEME.secondary,
+    warm:
+      raw?.warm && HEX_COLOR_RE.test(raw.warm)
+        ? raw.warm.toUpperCase()
+        : DEFAULT_BRAND_THEME.warm,
+    highlight:
+      raw?.highlight && HEX_COLOR_RE.test(raw.highlight)
+        ? raw.highlight.toUpperCase()
+        : DEFAULT_BRAND_THEME.highlight,
+  };
+}
+
+function getContrastingForeground(hex: string): string {
+  const clean = hex.replace("#", "");
+  const r = parseInt(clean.slice(0, 2), 16) / 255;
+  const g = parseInt(clean.slice(2, 4), 16) / 255;
+  const b = parseInt(clean.slice(4, 6), 16) / 255;
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return luminance > 0.62 ? "#1E293B" : "#FFFFFF";
+}
+
+function hexToHsl(hex: string): { h: number; s: number; l: number } {
+  const clean = hex.replace("#", "");
+  const r = parseInt(clean.slice(0, 2), 16) / 255;
+  const g = parseInt(clean.slice(2, 4), 16) / 255;
+  const b = parseInt(clean.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  let h = 0;
+  let s = 0;
+
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r:
+        h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+        break;
+      case g:
+        h = ((b - r) / d + 2) / 6;
+        break;
+      default:
+        h = ((r - g) / d + 4) / 6;
+        break;
+    }
+  }
+  return { h, s, l };
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  const hue2rgb = (p: number, q: number, t: number) => {
+    let tt = t;
+    if (tt < 0) tt += 1;
+    if (tt > 1) tt -= 1;
+    if (tt < 1 / 6) return p + (q - p) * 6 * tt;
+    if (tt < 1 / 2) return q;
+    if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6;
+    return p;
+  };
+
+  let r: number;
+  let g: number;
+  let b: number;
+  if (s === 0) {
+    r = g = b = l;
+  } else {
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1 / 3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1 / 3);
+  }
+  const toHex = (x: number) =>
+    Math.max(0, Math.min(255, Math.round(x * 255)))
+      .toString(16)
+      .padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
+}
+
+/**
+ * Derives a WCAG-safe dark brand surface (lightness clamped <= maxLightness)
+ * preserving the chosen primary hue so white text on Top Bar & Footer always
+ * maintains high contrast (>= 7:1) even if a user picks a bright primary color.
+ */
+export function deriveSafeDarkSurface(hex: string, maxLightness = 0.22): string {
+  const { h, s, l } = hexToHsl(hex);
+  const safeL = Math.min(l, maxLightness);
+  const safeS = Math.min(s, 0.56);
+  return hslToHex(h, safeS, safeL);
+}
+
+export function applyBrandThemeToDocument(
+  rawTheme?: Partial<BrandThemeColors> | null,
+): BrandThemeColors {
+  const theme = normalizeBrandTheme(rawTheme);
+  if (typeof document === "undefined") return theme;
+
+  const root = document.documentElement;
+  const primaryFg = getContrastingForeground(theme.primary);
+  const deepPrimary = deriveSafeDarkSurface(theme.primary, 0.22);
+  const footerDark = deriveSafeDarkSurface(theme.primary, 0.16);
+
+  root.style.setProperty("--primary", theme.primary);
+  root.style.setProperty("--primary-foreground", primaryFg);
+  root.style.setProperty("--brand-navy", theme.primary);
+  root.style.setProperty("--brand-deep-navy", deepPrimary);
+  root.style.setProperty("--brand-footer-dark", footerDark);
+  root.style.setProperty("--sidebar-primary", theme.primary);
+  root.style.setProperty("--sidebar-primary-foreground", primaryFg);
+  root.style.setProperty("--secondary-foreground", theme.primary);
+  root.style.setProperty("--accent-foreground", theme.primary);
+  root.style.setProperty("--chart-1", theme.primary);
+
+  root.style.setProperty("--primary-accent", theme.accent);
+  root.style.setProperty("--brand-blue", theme.accent);
+  root.style.setProperty("--ring", theme.accent);
+  root.style.setProperty("--sidebar-ring", theme.accent);
+  root.style.setProperty("--chart-2", theme.accent);
+
+  root.style.setProperty("--secondary", theme.secondary);
+  root.style.setProperty("--accent", theme.secondary);
+  root.style.setProperty("--brand-soft-blue", theme.secondary);
+  root.style.setProperty("--sidebar-accent", theme.secondary);
+  root.style.setProperty("--sidebar-accent-foreground", theme.primary);
+
+  root.style.setProperty("--warm", theme.warm);
+  root.style.setProperty("--brand-cream", theme.warm);
+
+  root.style.setProperty("--highlight", theme.highlight);
+  root.style.setProperty("--brand-coral", theme.highlight);
+  root.style.setProperty("--chart-3", theme.highlight);
+
+  return theme;
+}
+
+export function persistBrandThemeLocally(theme: BrandThemeColors): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(BRAND_THEME_STORAGE_KEY, JSON.stringify(theme));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function readStoredBrandTheme(): BrandThemeColors | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(BRAND_THEME_STORAGE_KEY);
+    if (!raw) return null;
+    return normalizeBrandTheme(JSON.parse(raw) as Partial<BrandThemeColors>);
+  } catch {
+    return null;
+  }
+}
+
+export function persistTeacherBrandLocally(
+  teacher: Partial<TeacherProfile>,
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      TEACHER_BRAND_STORAGE_KEY,
+      JSON.stringify(teacher),
+    );
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function readStoredTeacherBrand(): Partial<TeacherProfile> | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(TEACHER_BRAND_STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as Partial<TeacherProfile>;
+  } catch {
+    return null;
+  }
+}
 
 export interface SettingsFormDraft {
   name: string;
@@ -19,6 +306,7 @@ export interface SettingsFormDraft {
   location: string;
   credentials: string[];
   socials: TeacherProfile["socials"];
+  brandTheme: BrandThemeColors;
   currentTerm: string;
   defaultPortalPin: string;
   autoNotifyParents: boolean;
@@ -85,6 +373,7 @@ export const SETTINGS_FIELD_LABELS: Record<string, string> = {
   location: "Địa điểm phòng học",
   credentials: "Bằng cấp & Chứng chỉ",
   socials: "Kênh kết nối công khai",
+  brandTheme: "Bảng màu thương hiệu",
   currentTerm: "Học kỳ hiện tại",
   defaultPortalPin: "PIN tra cứu mặc định",
   autoNotifyParents: "Tự động nhắc Phụ huynh",

@@ -19,6 +19,7 @@ import {
 
 import { apiRequest } from "@/lib/api-client";
 import { removeVietnameseTones } from "@/lib/utils";
+import { readStoredTeacherBrand } from "@/services/settings-helpers";
 import {
   resolveWeekStatus,
   type ClassroomGroup,
@@ -98,7 +99,7 @@ function WeekProgressModalInner({
     String(week.plannedSessions ?? 2),
   );
   const [teacherName, setTeacherName] = React.useState(
-    week.teacherName ?? "ThS. Nguyễn Minh Anh",
+    () => week.teacherName ?? readStoredTeacherBrand()?.name ?? "",
   );
   const [notes, setNotes] = React.useState(week.notes ?? "");
   const [homework, setHomework] = React.useState(week.homework ?? "");

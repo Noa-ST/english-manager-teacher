@@ -13,8 +13,13 @@ import {
 } from "lucide-react";
 import type { SettingsAuditLogEntry } from "@/services/classroom-data";
 import {
+  applyBrandThemeToDocument,
   buildSnapshotFilename,
+  DEFAULT_BRAND_THEME,
+  normalizeBrandTheme,
+  persistBrandThemeLocally,
   SETTINGS_UPDATED_EVENT,
+  type BrandThemeColors,
   type SettingsAdminTab,
   type SettingsFormDraft,
 } from "@/services/settings-helpers";
@@ -67,6 +72,7 @@ function createDefaultDraft(): SettingsFormDraft {
     location: "",
     credentials: [],
     socials: [],
+    brandTheme: { ...DEFAULT_BRAND_THEME },
     currentTerm: "Học kỳ I · Năm học 2026–2027",
     defaultPortalPin: "123456",
     autoNotifyParents: true,
@@ -99,6 +105,7 @@ function extractDraftFromApi(res: SettingsApiResponse): SettingsFormDraft {
     socials: Array.isArray(res.socials)
       ? res.socials.map((s) => ({ ...s }))
       : defaults.socials,
+    brandTheme: normalizeBrandTheme(res.brandTheme),
     currentTerm: res.currentTerm ?? defaults.currentTerm,
     defaultPortalPin: res.defaultPortalPin ?? defaults.defaultPortalPin,
     autoNotifyParents: res.autoNotifyParents ?? defaults.autoNotifyParents,
@@ -212,6 +219,55 @@ function SettingsWorkspaceContent() {
         setIsRefreshing(false);
       });
   }, [applyApiResponse, isDirty, toast]);
+
+  const handleCommitAvatarUrl = React.useCallback(
+    async (newAvatarUrl: string) => {
+      const res = await apiRequest<SettingsApiResponse>("/api/admin/settings", {
+        method: "PUT",
+        body: JSON.stringify({ avatarUrl: newAvatarUrl }),
+      });
+      const resolvedUrl = res.avatarUrl ?? newAvatarUrl;
+      setSavedDraft((prev) => ({ ...prev, avatarUrl: resolvedUrl }));
+      setDraft((prev) => ({ ...prev, avatarUrl: resolvedUrl }));
+      setStorageStatus(res.storageStatus ?? null);
+      setHealth(res.health ?? null);
+      setAuditLogs(res.auditLogs ?? []);
+      window.dispatchEvent(
+        new CustomEvent(SETTINGS_UPDATED_EVENT, { detail: res }),
+      );
+    },
+    [],
+  );
+
+  const handleCommitBrandTheme = React.useCallback(
+    async (nextTheme: BrandThemeColors) => {
+      const normalized = applyBrandThemeToDocument(nextTheme);
+      persistBrandThemeLocally(normalized);
+      const res = await apiRequest<SettingsApiResponse>("/api/admin/settings", {
+        method: "PUT",
+        body: JSON.stringify({ brandTheme: normalized }),
+      });
+      const resolvedTheme = normalizeBrandTheme(res.brandTheme ?? normalized);
+      applyBrandThemeToDocument(resolvedTheme);
+      persistBrandThemeLocally(resolvedTheme);
+      setSavedDraft((prev) => ({ ...prev, brandTheme: resolvedTheme }));
+      setDraft((prev) => ({ ...prev, brandTheme: resolvedTheme }));
+      setStorageStatus(res.storageStatus ?? null);
+      setHealth(res.health ?? null);
+      setAuditLogs(res.auditLogs ?? []);
+      window.dispatchEvent(
+        new CustomEvent(SETTINGS_UPDATED_EVENT, { detail: res }),
+      );
+    },
+    [],
+  );
+
+  // Live preview brand theme as user tweaks colors on /settings
+  React.useEffect(() => {
+    if (!isLoading) {
+      applyBrandThemeToDocument(draft.brandTheme);
+    }
+  }, [draft.brandTheme, isLoading]);
 
   const handleSaveSettings = async () => {
     setIsSaving(true);
@@ -458,7 +514,12 @@ function SettingsWorkspaceContent() {
       ) : (
         <>
           {activeTab === "brand" && (
-            <SettingsBrandTab draft={draft} onChange={setDraft} />
+            <SettingsBrandTab
+              draft={draft}
+              onChange={setDraft}
+              onAvatarCommitted={handleCommitAvatarUrl}
+              onBrandThemeCommitted={handleCommitBrandTheme}
+            />
           )}
 
           {activeTab === "operations" && (

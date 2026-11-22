@@ -419,7 +419,7 @@ export function HomeAnnouncementsScheduleSection({
                       className={cn(
                         "relative flex flex-col items-center justify-center rounded-lg py-1.5 text-center transition-all select-none",
                         isSelected
-                          ? "bg-[#243B64] text-white shadow-xs"
+                          ? "bg-primary text-primary-foreground shadow-xs"
                           : activeCount > 0 || hasException
                             ? "text-[#253047] hover:bg-[#EAF0FA] hover:text-[#243B64]"
                             : "text-[#9AA2B1] opacity-70 hover:bg-[#F4F7FC]",

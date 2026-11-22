@@ -45,6 +45,7 @@ import type {
   AnalyticsAlertAckRecord,
   AnnouncementAttachment,
   AnnouncementItem,
+  BrandThemeColors,
   ClassroomGroup,
   ClassSessionRecord,
   CommunicationLogEntry,
@@ -237,6 +238,18 @@ export function parseVocabularyJson(
 //  SETTINGS & AUDIT MAPPERS
 // -----------------------------------------------------------------------------
 
+function parseBrandThemeJson(raw: unknown): BrandThemeColors | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  const hex = /^#[0-9A-Fa-f]{6}$/;
+  const primary = typeof obj.primary === "string" && hex.test(obj.primary) ? obj.primary.toUpperCase() : "#243B64";
+  const accent = typeof obj.accent === "string" && hex.test(obj.accent) ? obj.accent.toUpperCase() : "#496B9A";
+  const secondary = typeof obj.secondary === "string" && hex.test(obj.secondary) ? obj.secondary.toUpperCase() : "#EAF0FA";
+  const warm = typeof obj.warm === "string" && hex.test(obj.warm) ? obj.warm.toUpperCase() : "#F7F0E2";
+  const highlight = typeof obj.highlight === "string" && hex.test(obj.highlight) ? obj.highlight.toUpperCase() : "#E8A18B";
+  return { primary, accent, secondary, warm, highlight };
+}
+
 export function mapPrismaTeacherSetting(row: TeacherSetting): SystemSettingsState {
   return {
     name: row.name,
@@ -253,6 +266,7 @@ export function mapPrismaTeacherSetting(row: TeacherSetting): SystemSettingsStat
     officeHours: row.officeHours,
     location: row.location,
     socials: parseSocialsJson(row.socialsJson),
+    brandTheme: parseBrandThemeJson(row.brandThemeJson),
     currentTerm: row.currentTerm,
     defaultPortalPin: row.defaultPortalPin,
     autoNotifyParents: row.autoNotifyParents,

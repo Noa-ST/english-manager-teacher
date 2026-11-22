@@ -164,6 +164,34 @@ function GradesWorkspace() {
   };
 
   // Declare all useMemo BEFORE handlers (React Compiler rule)
+  const assessmentMetaMap = React.useMemo(() => {
+    const map: Record<string, AssessmentSummaryItem> = {};
+    for (const item of assessmentStats) {
+      map[item.title] = item;
+    }
+    return map;
+  }, [assessmentStats]);
+
+  const visibleAssessments = React.useMemo(() => {
+    if (selectedClassId === "all") return assessments;
+    const classStudentGradesSet = new Set<string>();
+    for (const s of students) {
+      if (s.classId === selectedClassId) {
+        for (const g of s.grades) classStudentGradesSet.add(g.assessmentTitle);
+      }
+    }
+    return assessments.filter((title) => {
+      const meta = assessmentMetaMap[title];
+      if (!meta?.classroomId) return true; // Global assessment
+      if (meta.classroomId === selectedClassId) return true; // Scoped to this class
+      return classStudentGradesSet.has(title); // Has existing grades in this class
+    });
+  }, [assessments, selectedClassId, assessmentMetaMap, students]);
+
+  const currentAssessmentMeta = selectedAssessment
+    ? assessmentMetaMap[selectedAssessment]
+    : undefined;
+
   const scopedRows = React.useMemo(() => {
     if (selectedClassId === "all") return rows;
     return rows.filter((r) => r.classId === selectedClassId);
@@ -235,11 +263,49 @@ function GradesWorkspace() {
       .filter((x): x is NonNullable<typeof x> => Boolean(x));
   }, [reportTargetIds, scopedRows, selectedAssessment]);
 
-  const handleAssessmentSwitch = (nextTitle: string) => {
+  const handleAssessmentSwitch = (
+    nextTitle: string,
+    explicitClassId?: string | null,
+  ) => {
     setSelectedAssessment(nextTitle);
     setRows(buildRowsForAssessment(students, nextTitle));
+    const meta = assessmentMetaMap[nextTitle];
+    const targetClassId =
+      explicitClassId !== undefined ? explicitClassId : meta?.classroomId;
+    if (targetClassId) {
+      setSelectedClassId(targetClassId);
+    }
+    if (meta?.examDate) {
+      setExamDate(meta.examDate);
+    }
     setChangeReason("");
     setActiveTab("entry");
+  };
+
+  const handleClassSwitch = (nextClassId: string) => {
+    setSelectedClassId(nextClassId);
+    if (nextClassId !== "all" && selectedAssessment) {
+      const meta = assessmentMetaMap[selectedAssessment];
+      const belongsToOtherClass =
+        meta?.classroomId && meta.classroomId !== nextClassId;
+      if (belongsToOtherClass) {
+        const hasGradesInNewClass = students.some(
+          (s) =>
+            s.classId === nextClassId &&
+            s.grades.some((g) => g.assessmentTitle === selectedAssessment),
+        );
+        if (!hasGradesInNewClass) {
+          const fallback = assessments.find((t) => {
+            const m = assessmentMetaMap[t];
+            return !m?.classroomId || m.classroomId === nextClassId;
+          });
+          if (fallback) {
+            setSelectedAssessment(fallback);
+            setRows(buildRowsForAssessment(students, fallback));
+          }
+        }
+      }
+    }
   };
 
   const handleScoreChange = (
@@ -475,23 +541,42 @@ function GradesWorkspace() {
           {/* Assessment, Class & Date Selector */}
           <div className="grid gap-4 rounded-2xl border border-border bg-card p-5 lg:grid-cols-12">
             <div className="space-y-1.5 lg:col-span-5">
-              <label
-                htmlFor="grade-assessment-select"
-                className="block text-xs font-semibold text-foreground"
-              >
-                Kỳ kiểm tra / Bài đánh giá
-              </label>
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="grade-assessment-select"
+                  className="block text-xs font-semibold text-foreground"
+                >
+                  Kỳ kiểm tra / Bài đánh giá
+                </label>
+                {currentAssessmentMeta?.classroomId && currentAssessmentMeta.classCode ? (
+                  <span className="rounded-md border border-primary/30 bg-primary/8 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                    Riêng lớp {currentAssessmentMeta.classCode}
+                  </span>
+                ) : selectedAssessment ? (
+                  <span className="rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                    Phạm vi: Tất cả các lớp
+                  </span>
+                ) : null}
+              </div>
               <select
                 id="grade-assessment-select"
                 value={selectedAssessment}
                 onChange={(e) => handleAssessmentSwitch(e.target.value)}
                 className="h-9 w-full rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
               >
-                {assessments.map((a) => (
-                  <option key={a} value={a}>
-                    {a}
-                  </option>
-                ))}
+                {visibleAssessments.map((a) => {
+                  const meta = assessmentMetaMap[a];
+                  const suffix =
+                    meta?.classroomId && meta.classCode
+                      ? ` [Riêng ${meta.classCode}]`
+                      : "";
+                  return (
+                    <option key={a} value={a}>
+                      {a}
+                      {suffix}
+                    </option>
+                  );
+                })}
               </select>
             </div>
 
@@ -505,7 +590,7 @@ function GradesWorkspace() {
               <select
                 id="grade-class-select"
                 value={selectedClassId}
-                onChange={(e) => setSelectedClassId(e.target.value)}
+                onChange={(e) => handleClassSwitch(e.target.value)}
                 className="h-9 w-full rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
               >
                 <option value="all">Tất cả các lớp ({rows.length} HV)</option>
@@ -562,10 +647,13 @@ function GradesWorkspace() {
 
       <GradesAssessmentModal
         open={isNewTestModalOpen}
+        classes={classes}
+        defaultClassId={selectedClassId}
         onClose={() => setIsNewTestModalOpen(false)}
-        onCreated={(title, nextAssessments, defaultDate) => {
+        onCreated={(title, nextAssessments, defaultDate, scopeClassId) => {
           setAssessments(nextAssessments);
           setSelectedAssessment(title);
+          setSelectedClassId(scopeClassId);
           setExamDate(defaultDate);
           setRows(buildRowsForAssessment(students, title));
           setIsNewTestModalOpen(false);

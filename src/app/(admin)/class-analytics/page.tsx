@@ -216,26 +216,30 @@ function ClassAnalyticsWorkspace() {
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
-        <div>
+        <div className="min-w-0">
           <h1 className="font-heading text-2xl font-bold text-foreground sm:text-3xl">
             Phân tích Hiệu quả Lớp học
           </h1>
-          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+          <p className="mt-1 max-w-xl text-sm text-muted-foreground">
             Tổng hợp chuyên cần, tiến độ chương trình, tỷ lệ BTVN, xu hướng 4 kỹ năng đã công bố và cảnh báo hỗ trợ kịp thời.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!report}
-            onClick={() => setSummaryOpen(true)}
-            className="h-9 shrink-0 px-3 text-xs whitespace-nowrap"
+        <div className="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
+          <Link
+            href="/classes"
+            className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-background px-3 text-xs font-medium whitespace-nowrap text-foreground transition-colors hover:bg-muted"
           >
-            <FileText className="size-4 text-primary" aria-hidden="true" />
-            Tóm tắt báo cáo
-          </Button>
+            <BookOpen className="size-3.5 text-primary" aria-hidden="true" />
+            Quản lý lớp
+          </Link>
+          <Link
+            href="/teaching-journal"
+            className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-background px-3 text-xs font-medium whitespace-nowrap text-foreground transition-colors hover:bg-muted"
+          >
+            <ClipboardList className="size-3.5 text-primary" aria-hidden="true" />
+            Nhật ký
+          </Link>
           <Button
             type="button"
             variant="outline"
@@ -243,32 +247,29 @@ function ClassAnalyticsWorkspace() {
             onClick={handleExportCsv}
             className="h-9 shrink-0 px-3 text-xs whitespace-nowrap"
           >
-            <Download className="size-4" aria-hidden="true" />
+            <Download className="size-3.5" aria-hidden="true" />
             Xuất CSV
           </Button>
           <Button
             type="button"
             variant="outline"
+            size="icon"
             onClick={() => setReloadNonce((n) => n + 1)}
-            className="h-9 shrink-0 px-3 text-xs whitespace-nowrap"
+            title="Làm mới dữ liệu"
+            aria-label="Làm mới dữ liệu"
+            className="size-9 shrink-0"
           >
-            <RefreshCw className="size-4" aria-hidden="true" />
-            Làm mới
+            <RefreshCw className="size-3.5" aria-hidden="true" />
           </Button>
-          <Link
-            href="/teaching-journal"
-            className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-background px-3 text-xs font-medium whitespace-nowrap text-foreground transition-colors hover:bg-muted"
+          <Button
+            type="button"
+            disabled={!report}
+            onClick={() => setSummaryOpen(true)}
+            className="h-9 shrink-0 px-3.5 text-xs whitespace-nowrap"
           >
-            <ClipboardList className="size-4 text-primary" aria-hidden="true" />
-            Nhật ký giảng dạy
-          </Link>
-          <Link
-            href="/classes"
-            className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-background px-3 text-xs font-medium whitespace-nowrap text-foreground transition-colors hover:bg-muted"
-          >
-            <BookOpen className="size-4 text-primary" aria-hidden="true" />
-            Quản lý Lớp
-          </Link>
+            <FileText className="size-3.5" aria-hidden="true" />
+            Tóm tắt báo cáo
+          </Button>
         </div>
       </div>
 

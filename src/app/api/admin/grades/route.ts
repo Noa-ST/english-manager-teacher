@@ -34,6 +34,8 @@ export const POST = adminRoute(async (request) => {
   if (body?.action === "create-assessment") {
     const assessments = await studentService.createAssessment({
       title: body.title,
+      classroomId: body.classId ?? null,
+      examDate: body.date ?? null,
     });
     return ok({ assessments }, { status: 201 });
   }

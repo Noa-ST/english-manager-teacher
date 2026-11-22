@@ -21,9 +21,13 @@ import {
 } from "./prisma-mappers";
 import {
   BRAND_DESIGN_TOKENS,
+  DEFAULT_BRAND_THEME,
   SETTINGS_FIELD_LABELS,
 } from "./settings-helpers";
-import { getStorageStatus } from "./storage.service";
+import {
+  cleanupReplacedCloudinaryImage,
+  getStorageStatus,
+} from "./storage.service";
 
 export { BRAND_DESIGN_TOKENS };
 
@@ -60,6 +64,19 @@ const DEFAULT_TEACHER_SETTINGS: SystemSettingsState = {
   tuitionReminderDaysBefore: 7,
   requirePortalVerification: true,
 };
+
+const hexColorSchema = z
+  .string()
+  .trim()
+  .regex(/^#[0-9A-Fa-f]{6}$/, "Mã màu phải đúng định dạng Hex (#RRGGBB).");
+
+export const brandThemeSchema = z.object({
+  primary: hexColorSchema,
+  accent: hexColorSchema,
+  secondary: hexColorSchema,
+  warm: hexColorSchema,
+  highlight: hexColorSchema,
+});
 
 export const updateSettingsSchema = z.object({
   name: z
@@ -114,6 +131,7 @@ export const updateSettingsSchema = z.object({
       }),
     )
     .optional(),
+  brandTheme: brandThemeSchema.optional(),
   currentTerm: z.string().trim().max(120).optional(),
   defaultPortalPin: z
     .string()
@@ -212,6 +230,7 @@ async function ensureDefaultSettingsRow() {
       email: DEFAULT_TEACHER_SETTINGS.email,
       avatarUrl: DEFAULT_TEACHER_SETTINGS.avatarUrl ?? null,
       socialsJson: toPrismaJson(DEFAULT_TEACHER_SETTINGS.socials),
+      brandThemeJson: toPrismaJson(DEFAULT_BRAND_THEME),
       officeHours: DEFAULT_TEACHER_SETTINGS.officeHours,
       location: DEFAULT_TEACHER_SETTINGS.location,
       currentTerm: DEFAULT_TEACHER_SETTINGS.currentTerm,
@@ -289,6 +308,11 @@ export async function getTeacherBrandProfile(): Promise<TeacherProfile> {
   };
 }
 
+export async function getPublicBrandTheme() {
+  const settings = await getSystemSettings();
+  return settings.brandTheme ?? DEFAULT_BRAND_THEME;
+}
+
 function areSettingValuesEqual(prevVal: unknown, nextVal: unknown): boolean {
   if (Array.isArray(prevVal) || Array.isArray(nextVal)) {
     return JSON.stringify(prevVal) === JSON.stringify(nextVal);
@@ -346,6 +370,9 @@ export async function updateSystemSettings(
       ...(data.socials !== undefined
         ? { socialsJson: toPrismaJson(data.socials) }
         : {}),
+      ...(data.brandTheme !== undefined
+        ? { brandThemeJson: toPrismaJson(data.brandTheme) }
+        : {}),
       ...(data.currentTerm !== undefined
         ? { currentTerm: data.currentTerm }
         : {}),
@@ -367,6 +394,15 @@ export async function updateSystemSettings(
       requirePortalVerification: true,
     },
   });
+
+  if (data.avatarUrl !== undefined && current.avatarUrl !== updatedRow.avatarUrl) {
+    await cleanupReplacedCloudinaryImage({
+      oldUrl: current.avatarUrl,
+      newUrl: updatedRow.avatarUrl,
+      actorId,
+      reason: "Đổi ảnh đại diện Giáo viên (Hồ sơ Thương hiệu)",
+    });
+  }
 
   if (changedFields.length > 0) {
     const isSecurityChange =
@@ -404,7 +440,7 @@ export async function updateSystemSettings(
 export async function resetSystemSettings(
   actorId = "admin",
 ): Promise<SystemSettingsState> {
-  await ensureDefaultSettingsRow();
+  const previous = await ensureDefaultSettingsRow();
 
   const updatedRow = await prisma.teacherSetting.update({
     where: { id: "default" },
@@ -421,6 +457,7 @@ export async function resetSystemSettings(
       bandAchievementRate: DEFAULT_TEACHER_SETTINGS.bandAchievementRate,
       email: DEFAULT_TEACHER_SETTINGS.email,
       socialsJson: toPrismaJson(DEFAULT_TEACHER_SETTINGS.socials),
+      brandThemeJson: toPrismaJson(DEFAULT_BRAND_THEME),
       officeHours: DEFAULT_TEACHER_SETTINGS.officeHours,
       location: DEFAULT_TEACHER_SETTINGS.location,
       currentTerm: DEFAULT_TEACHER_SETTINGS.currentTerm,
@@ -434,6 +471,15 @@ export async function resetSystemSettings(
       requirePortalVerification: true,
     },
   });
+
+  if (previous.avatarUrl && previous.avatarUrl !== updatedRow.avatarUrl) {
+    await cleanupReplacedCloudinaryImage({
+      oldUrl: previous.avatarUrl,
+      newUrl: updatedRow.avatarUrl,
+      actorId,
+      reason: "Đặt lại cài đặt mặc định (dọn ảnh đại diện cũ)",
+    });
+  }
 
   await recordSettingsAuditLog({
     action: "RESET_SETTINGS",

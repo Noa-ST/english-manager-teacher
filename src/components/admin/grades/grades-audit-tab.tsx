@@ -27,7 +27,7 @@ import { useToast } from "@/components/ui/toast";
 interface GradesAuditTabProps {
   assessmentStats: AssessmentSummaryItem[];
   changeHistory: GradeAuditEntry[];
-  onOpenAssessment: (title: string) => void;
+  onOpenAssessment: (title: string, classroomId?: string | null) => void;
   onRefresh: () => Promise<void>;
 }
 
@@ -177,12 +177,28 @@ export function GradesAuditTab({
               {assessmentStats.map((item) => (
                 <tr key={item.title} className="hover:bg-muted/20">
                   <td className="px-4 py-3.5">
-                    <p className="font-heading font-semibold text-foreground">
-                      {item.title}
-                    </p>
-                    {item.latestDate && (
-                      <p className="text-xs text-muted-foreground tabular-nums">
-                        Cập nhật ngày thi: {item.latestDate}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-heading font-semibold text-foreground">
+                        {item.title}
+                      </p>
+                      {item.classroomId && item.classCode ? (
+                        <Badge variant="outline" className="border-primary/30 bg-primary/5 text-[10px] text-primary">
+                          Riêng lớp {item.classCode}
+                        </Badge>
+                      ) : (
+                        <Badge variant="secondary" className="text-[10px]">
+                          Tất cả các lớp
+                        </Badge>
+                      )}
+                    </div>
+                    {(item.latestDate || item.examDate || item.className) && (
+                      <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
+                        {item.className ? `${item.className}` : "Kỳ thi chung"}
+                        {item.latestDate
+                          ? ` · Cập nhật ngày thi: ${item.latestDate}`
+                          : item.examDate
+                            ? ` · Ngày thi dự kiến: ${item.examDate}`
+                            : ""}
                       </p>
                     )}
                   </td>
@@ -212,7 +228,7 @@ export function GradesAuditTab({
                         type="button"
                         size="sm"
                         variant="default"
-                        onClick={() => onOpenAssessment(item.title)}
+                        onClick={() => onOpenAssessment(item.title, item.classroomId)}
                         className="h-8 px-2.5 text-xs whitespace-nowrap"
                       >
                         Mở bảng điểm

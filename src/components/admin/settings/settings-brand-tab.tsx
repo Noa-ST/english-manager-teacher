@@ -4,19 +4,35 @@ import * as React from "react";
 import Link from "next/link";
 import {
   Award,
+  Check,
   Clock,
   Copy,
   ExternalLink,
+  GraduationCap,
+  ImageIcon,
   Link2,
+  Loader2,
   Mail,
   MapPin,
   Palette,
   Plus,
+  RotateCcw,
+  Save,
+  Sparkles,
   Trash2,
+  Trophy,
+  UploadCloud,
   UserCheck,
 } from "lucide-react";
+import { apiRequest } from "@/lib/api-client";
 import {
-  BRAND_DESIGN_TOKENS,
+  parseCredentialDisplay,
+  splitSloganLines,
+} from "@/services/cms-helpers";
+import {
+  BRAND_THEME_PRESETS,
+  DEFAULT_BRAND_THEME,
+  type BrandThemeColors,
   type SettingsFormDraft,
 } from "@/services/settings-helpers";
 import { Badge } from "@/components/ui/badge";
@@ -27,17 +43,148 @@ import { useToast } from "@/components/ui/toast";
 export function SettingsBrandTab({
   draft,
   onChange,
+  onAvatarCommitted,
+  onBrandThemeCommitted,
 }: {
   draft: SettingsFormDraft;
   onChange: (updater: (prev: SettingsFormDraft) => SettingsFormDraft) => void;
+  onAvatarCommitted?: (newAvatarUrl: string) => Promise<void>;
+  onBrandThemeCommitted?: (nextTheme: BrandThemeColors) => Promise<void>;
 }) {
   const { toast } = useToast();
+  const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
+  const [isSavingTheme, setIsSavingTheme] = React.useState(false);
+  const [showManualAvatarUrl, setShowManualAvatarUrl] = React.useState(false);
+  const avatarFileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const updateField = <K extends keyof SettingsFormDraft>(
     key: K,
     value: SettingsFormDraft[K],
   ) => {
     onChange((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleAvatarFileChange = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      toast({
+        title: "Định dạng ảnh không hợp lệ",
+        description: "Vui lòng chọn tệp hình ảnh (JPG, PNG, WebP).",
+        variant: "error",
+      });
+      if (avatarFileInputRef.current) avatarFileInputRef.current.value = "";
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      toast({
+        title: "Ảnh vượt quá dung lượng",
+        description: "Giới hạn ảnh đại diện giáo viên là 5 MB.",
+        variant: "error",
+      });
+      if (avatarFileInputRef.current) avatarFileInputRef.current.value = "";
+      return;
+    }
+
+    setIsUploadingAvatar(true);
+    try {
+      const ticket = await apiRequest<{
+        uploadUrl: string;
+        method: "POST" | "PUT";
+        formFields?: Record<string, string>;
+        publicUrl: string | null;
+        objectKey?: string;
+        cloudinaryPublicId?: string;
+      }>("/api/admin/storage/upload-url", {
+        method: "POST",
+        body: JSON.stringify({
+          folder: "avatars",
+          fileName: file.name,
+          contentType: file.type,
+          size: file.size,
+          visibility: "public",
+          imageCategory: "teacher_avatar",
+        }),
+      });
+
+      let finalUrl = ticket.publicUrl;
+      let finalPublicId = ticket.cloudinaryPublicId ?? ticket.objectKey;
+
+      if (ticket.method === "POST" && ticket.formFields && ticket.uploadUrl) {
+        const form = new FormData();
+        Object.entries(ticket.formFields).forEach(([k, v]) =>
+          form.append(k, v),
+        );
+        form.append("file", file);
+
+        const uploadRes = await fetch(ticket.uploadUrl, {
+          method: "POST",
+          body: form,
+        });
+        if (!uploadRes.ok) {
+          throw new Error("Không thể tải ảnh lên Cloudinary.");
+        }
+        const cloudPayload = (await uploadRes.json().catch(() => null)) as {
+          secure_url?: string;
+          public_id?: string;
+        } | null;
+        if (cloudPayload?.secure_url) finalUrl = cloudPayload.secure_url;
+        if (cloudPayload?.public_id) finalPublicId = cloudPayload.public_id;
+      }
+
+      if (!finalUrl) {
+        throw new Error("Cloudinary không trả về đường dẫn ảnh hợp lệ.");
+      }
+
+      // Register in StoredFile inventory for /storage tracking & auto-cleanup
+      await apiRequest("/api/admin/storage", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "uploadImage",
+          fileName: file.name,
+          mimeType: file.type,
+          sizeBytes: file.size,
+          category: "teacher_avatar",
+          referencedBy: "Hồ sơ Thương hiệu Giáo viên",
+          existingPublicId: finalPublicId,
+          existingPublicUrl: finalUrl,
+        }),
+      }).catch(() => {});
+
+      if (onAvatarCommitted) {
+        await onAvatarCommitted(finalUrl);
+        toast({
+          title: "Đã cập nhật ảnh đại diện giáo viên",
+          description:
+            "Ảnh mới đã lưu vào Cloudinary, đồng bộ toàn hệ thống và tự động dọn ảnh cũ.",
+          variant: "success",
+        });
+      } else {
+        updateField("avatarUrl", finalUrl);
+        toast({
+          title: "Tải ảnh đại diện lên Cloudinary thành công",
+          description:
+            "Bấm 'Lưu thay đổi' ở góc trên để áp dụng và tự động dọn ảnh cũ.",
+          variant: "success",
+        });
+      }
+    } catch (err) {
+      toast({
+        title: "Tải ảnh thất bại",
+        description:
+          err instanceof Error
+            ? err.message
+            : "Vui lòng kiểm tra cấu hình Cloudinary và thử lại.",
+        variant: "error",
+      });
+    } finally {
+      setIsUploadingAvatar(false);
+      if (avatarFileInputRef.current) avatarFileInputRef.current.value = "";
+    }
   };
 
   const handleCredentialChange = (index: number, value: string) => {
@@ -108,6 +255,19 @@ export function SettingsBrandTab({
   };
 
   const avatarPreviewSrc = draft.avatarUrl.trim() || "/images/teacher-avatar.jpg";
+  const [sloganLine1, sloganLine2] = React.useMemo(
+    () => splitSloganLines(draft.slogan),
+    [draft.slogan],
+  );
+  const previewCredentials = React.useMemo(
+    () =>
+      draft.credentials
+        .map((c) => c.trim())
+        .filter(Boolean)
+        .slice(0, 3)
+        .map(parseCredentialDisplay),
+    [draft.credentials],
+  );
 
   return (
     <div className="grid gap-6 lg:grid-cols-12">
@@ -182,18 +342,111 @@ export function SettingsBrandTab({
               </div>
 
               <div className="space-y-1.5">
-                <label
-                  htmlFor="set-avatar"
-                  className="block text-xs font-semibold text-foreground"
-                >
-                  Ảnh đại diện giáo viên (URL hoặc /images/...)
-                </label>
-                <Input
-                  id="set-avatar"
-                  value={draft.avatarUrl}
-                  onChange={(e) => updateField("avatarUrl", e.target.value)}
-                  placeholder="/images/teacher-avatar.jpg"
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                    <ImageIcon className="size-3.5 text-primary" aria-hidden="true" />
+                    Ảnh đại diện giáo viên (Cloudinary)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowManualAvatarUrl((v) => !v)}
+                    className="text-[11px] font-medium text-muted-foreground hover:text-primary"
+                  >
+                    {showManualAvatarUrl ? "Ẩn nhập link URL" : "Nhập link URL"}
+                  </button>
+                </div>
+
+                <input
+                  ref={avatarFileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={(e) => void handleAvatarFileChange(e)}
+                  className="hidden"
                 />
+
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-muted/25 p-2.5">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={avatarPreviewSrc}
+                      alt={draft.name || "Ảnh đại diện giáo viên"}
+                      className="size-10 shrink-0 rounded-xl border border-border object-cover"
+                    />
+                    <div className="min-w-0">
+                      <p className="truncate text-xs font-semibold text-foreground">
+                        {draft.avatarUrl.includes("res.cloudinary.com")
+                          ? "Ảnh Cloudinary HD"
+                          : "Ảnh đại diện hiện tại"}
+                      </p>
+                      <p className="truncate text-[10px] text-muted-foreground">
+                        JPG, PNG, WebP · Tối đa 5 MB
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={isUploadingAvatar}
+                      onClick={() => avatarFileInputRef.current?.click()}
+                      className="h-8 px-2.5 text-xs whitespace-nowrap"
+                    >
+                      {isUploadingAvatar ? (
+                        <>
+                          <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                          Đang tải...
+                        </>
+                      ) : (
+                        <>
+                          <UploadCloud className="size-3.5 text-primary" aria-hidden="true" />
+                          Đổi ảnh
+                        </>
+                      )}
+                    </Button>
+                    {draft.avatarUrl &&
+                      draft.avatarUrl !== "/images/teacher-avatar.jpg" && (
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          onClick={async () => {
+                            const fallbackUrl = "/images/teacher-avatar.jpg";
+                            if (onAvatarCommitted) {
+                              setIsUploadingAvatar(true);
+                              try {
+                                await onAvatarCommitted(fallbackUrl);
+                                toast({
+                                  title: "Đã khôi phục ảnh đại diện mặc định",
+                                  variant: "info",
+                                });
+                              } finally {
+                                setIsUploadingAvatar(false);
+                              }
+                            } else {
+                              updateField("avatarUrl", fallbackUrl);
+                            }
+                          }}
+                          title="Khôi phục ảnh mặc định"
+                          aria-label="Khôi phục ảnh mặc định"
+                          className="size-8 shrink-0 text-muted-foreground hover:text-foreground"
+                        >
+                          <RotateCcw className="size-3.5" aria-hidden="true" />
+                        </Button>
+                      )}
+                  </div>
+                </div>
+
+                {showManualAvatarUrl && (
+                  <Input
+                    id="set-avatar"
+                    value={draft.avatarUrl}
+                    onChange={(e) => updateField("avatarUrl", e.target.value)}
+                    placeholder="https://res.cloudinary.com/... hoặc /images/teacher-avatar.jpg"
+                    className="h-8 text-xs"
+                  />
+                )}
               </div>
             </div>
 
@@ -451,29 +704,29 @@ export function SettingsBrandTab({
         </section>
       </div>
 
-      {/* Right Column: Live Brand Preview & Design Tokens (5 cols) */}
+      {/* Right Column: Live Hero & Brand Preview + Design Tokens (5 cols) */}
       <div className="space-y-6 lg:col-span-5">
-        {/* Live Teacher Brand Card Preview */}
+        {/* Live Hero & Public Brand Preview (Consolidated from Brand Studio) */}
         <section className="rounded-2xl border border-border bg-card p-6 shadow-xs">
           <div className="flex items-center justify-between gap-2 border-b border-border pb-4">
-            <div>
-              <h2 className="font-heading text-base font-bold text-foreground">
-                Xem trước Hiển thị Công khai
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                Cập nhật theo thời gian thực khi chỉnh sửa.
-              </p>
+            <div className="flex items-center gap-2">
+              <Badge variant="warm" className="gap-1">
+                <Sparkles className="size-3" aria-hidden="true" />
+                Xem trước Hero Trang chủ
+              </Badge>
             </div>
             <Link
-              href={{ pathname: "/cms", query: { tab: "brand" } }}
+              href="/"
+              target="_blank"
               className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
             >
-              Mở Brand Studio
+              Xem Trang chủ thực tế
               <ExternalLink className="size-3.5" aria-hidden="true" />
             </Link>
           </div>
 
-          <div className="mt-4 space-y-4 rounded-xl border border-border bg-background/70 p-4">
+          <div className="mt-4 space-y-4 rounded-xl border border-border bg-warm/30 p-4">
+            {/* Teacher Identity + Eyebrow */}
             <div className="flex items-center gap-3.5">
               <div className="size-14 shrink-0 overflow-hidden rounded-xl border border-border bg-muted">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -487,21 +740,91 @@ export function SettingsBrandTab({
                 <p className="truncate font-heading text-sm font-bold text-foreground">
                   {draft.name || "Chưa nhập tên giáo viên"}
                 </p>
-                <p className="truncate text-xs text-primary">
+                <p className="truncate text-[11px] font-semibold uppercase tracking-wider text-primary">
                   {draft.title || "Chức danh chuyên môn"}
-                </p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {draft.experienceYears}+ năm · {draft.totalStudents}+ học viên ·{" "}
-                  {draft.bandAchievementRate}
                 </p>
               </div>
             </div>
 
-            <p className="rounded-lg bg-warm/60 px-3 py-2 font-serif text-xs text-foreground italic">
-              &ldquo;{draft.slogan || "Thông điệp sư phạm"}&rdquo;
-            </p>
+            {/* 2-Line Contrasting Hero Headline */}
+            <div className="space-y-1">
+              <p className="font-heading text-lg leading-snug font-bold text-foreground">
+                {sloganLine1 || "Thông điệp sư phạm"}
+                {sloganLine2 && (
+                  <>
+                    {" "}
+                    <span className="font-serif font-normal italic text-primary">
+                      {sloganLine2}
+                    </span>
+                  </>
+                )}
+              </p>
+              {draft.shortBio && (
+                <p className="line-clamp-3 text-xs leading-relaxed text-muted-foreground">
+                  {draft.shortBio}
+                </p>
+              )}
+            </div>
 
-            <div className="space-y-1.5 text-xs text-muted-foreground">
+            {/* Top 3 Credentials */}
+            {previewCredentials.length > 0 && (
+              <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
+                {previewCredentials.map((cred, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-start gap-2 rounded-lg border border-border/80 bg-card px-2.5 py-2"
+                  >
+                    {idx === 0 ? (
+                      <GraduationCap className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden="true" />
+                    ) : idx === 1 ? (
+                      <Trophy className="mt-0.5 size-3.5 shrink-0 text-amber-600" aria-hidden="true" />
+                    ) : (
+                      <Award className="mt-0.5 size-3.5 shrink-0 text-emerald-600" aria-hidden="true" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="truncate text-[11px] font-bold text-foreground">
+                        {cred.title}
+                      </p>
+                      {cred.subtitle && (
+                        <p className="truncate text-[10px] text-muted-foreground">
+                          {cred.subtitle}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* 3 Highlight Metrics */}
+            <div className="grid grid-cols-3 gap-2">
+              <div className="rounded-lg border border-border/80 bg-card p-2.5 text-center">
+                <p className="font-heading text-sm font-bold text-foreground">
+                  {draft.experienceYears}+ năm
+                </p>
+                <p className="text-[10px] text-muted-foreground">Kinh nghiệm</p>
+              </div>
+              <div className="rounded-lg border border-border/80 bg-card p-2.5 text-center">
+                <p className="font-heading text-sm font-bold text-foreground">
+                  {draft.totalStudents}+
+                </p>
+                <p className="text-[10px] text-muted-foreground">Học viên</p>
+              </div>
+              <div className="rounded-lg border border-border/80 bg-card p-2.5 text-center">
+                <p className="truncate font-heading text-xs font-bold text-primary">
+                  {draft.bandAchievementRate || "94%+"}
+                </p>
+                <p className="text-[10px] text-muted-foreground">Đạt mục tiêu</p>
+              </div>
+            </div>
+
+            {draft.philosophy && (
+              <p className="rounded-lg border border-border/70 bg-card px-3 py-2 font-serif text-xs text-foreground italic">
+                &ldquo;{draft.philosophy}&rdquo;
+              </p>
+            )}
+
+            <div className="space-y-1.5 border-t border-border/60 pt-3 text-xs text-muted-foreground">
               <p className="flex items-center gap-2">
                 <Mail className="size-3.5 shrink-0 text-primary" aria-hidden="true" />
                 <span className="truncate">{draft.email}</span>
@@ -518,51 +841,233 @@ export function SettingsBrandTab({
           </div>
         </section>
 
-        {/* Design System Tokens Card */}
+        {/* Interactive System-Wide Brand Theme Customizer */}
         <section className="rounded-2xl border border-border bg-card p-6 shadow-xs">
-          <div className="flex items-center gap-2.5 border-b border-border pb-4">
-            <div className="flex size-9 items-center justify-center rounded-xl bg-secondary/50 text-primary">
-              <Palette className="size-4" aria-hidden="true" />
-            </div>
-            <div>
-              <h2 className="font-heading text-base font-bold text-foreground">
-                Hệ thống Bảng màu Thương hiệu (Design Tokens)
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                Nhấn vào thẻ màu để sao chép nhanh mã Hex chuẩn Modern Academic.
-              </p>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-4">
+            <div className="flex items-center gap-2.5">
+              <div className="flex size-9 items-center justify-center rounded-xl bg-secondary/70 text-primary">
+                <Palette className="size-4" aria-hidden="true" />
+              </div>
+              <div>
+                <h2 className="font-heading text-base font-bold text-foreground">
+                  Bảng màu Giao diện Toàn hệ thống
+                </h2>
+                <p className="text-xs text-muted-foreground">
+                  Chọn bộ màu mẫu hoặc tùy chỉnh từng mã màu — áp dụng trực tiếp cho Admin &amp; Cổng Học sinh.
+                </p>
+              </div>
             </div>
           </div>
 
-          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-2">
-            {Object.values(BRAND_DESIGN_TOKENS).map((token) => (
-              <button
-                key={token.hex}
+          {/* 6 Curated Academic Presets */}
+          <div className="mt-4 space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Bộ màu mẫu nhanh (1 chạm)
+            </p>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-2">
+              {BRAND_THEME_PRESETS.map((preset) => {
+                const isActive =
+                  draft.brandTheme.primary.toUpperCase() ===
+                    preset.colors.primary.toUpperCase() &&
+                  draft.brandTheme.accent.toUpperCase() ===
+                    preset.colors.accent.toUpperCase();
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => updateField("brandTheme", { ...preset.colors })}
+                    className={`flex items-center justify-between gap-2 rounded-xl border p-2.5 text-left transition-all ${
+                      isActive
+                        ? "border-primary bg-primary/8 ring-1 ring-primary/30"
+                        : "border-border bg-background hover:border-primary/40"
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="size-3.5 shrink-0 rounded-full border border-black/15"
+                          style={{ backgroundColor: preset.colors.primary }}
+                        />
+                        <span
+                          className="size-2.5 shrink-0 rounded-full border border-black/10"
+                          style={{ backgroundColor: preset.colors.accent }}
+                        />
+                        <span
+                          className="size-2.5 shrink-0 rounded-full border border-black/10"
+                          style={{ backgroundColor: preset.colors.highlight }}
+                        />
+                      </div>
+                      <p className="mt-1.5 truncate text-xs font-semibold text-foreground">
+                        {preset.name}
+                      </p>
+                      <p className="truncate text-[10px] text-muted-foreground">
+                        {preset.subtitle}
+                      </p>
+                    </div>
+                    {isActive && (
+                      <Check
+                        className="size-4 shrink-0 text-primary"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 5 Individual Color Pickers */}
+          <div className="mt-4 space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Tùy chỉnh chi tiết từng màu
+            </p>
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              {(
+                [
+                  {
+                    key: "primary" as const,
+                    name: "Màu chủ đạo (Primary)",
+                    role: "Nút chính, tiêu đề, menu đang chọn",
+                  },
+                  {
+                    key: "accent" as const,
+                    name: "Màu điểm nhấn (Accent)",
+                    role: "Viền focus, icon nhấn, biểu đồ",
+                  },
+                  {
+                    key: "secondary" as const,
+                    name: "Màu nền phụ (Secondary)",
+                    role: "Nền badge phụ, hover nhẹ",
+                  },
+                  {
+                    key: "warm" as const,
+                    name: "Màu nền ấm (Warm)",
+                    role: "Nền thẻ nổi bật, khu vực Hero",
+                  },
+                  {
+                    key: "highlight" as const,
+                    name: "Màu nổi bật (Highlight)",
+                    role: "Cảnh báo nhẹ, điểm nhấn tiến độ",
+                  },
+                ] as const
+              ).map((token) => {
+                const value = draft.brandTheme[token.key];
+                return (
+                  <div
+                    key={token.key}
+                    className="flex items-center justify-between gap-2 rounded-xl border border-border bg-background p-2.5"
+                  >
+                    <label className="flex min-w-0 cursor-pointer items-center gap-2.5">
+                      <input
+                        type="color"
+                        value={value}
+                        onChange={(e) =>
+                          updateField("brandTheme", {
+                            ...draft.brandTheme,
+                            [token.key]: e.target.value.toUpperCase(),
+                          })
+                        }
+                        aria-label={`Chọn ${token.name}`}
+                        className="size-8 shrink-0 cursor-pointer rounded-lg border border-black/15 bg-transparent p-0.5"
+                      />
+                      <div className="min-w-0">
+                        <p className="truncate text-[11px] font-semibold text-foreground">
+                          {token.name}
+                        </p>
+                        <p className="font-mono text-[10px] text-muted-foreground">
+                          {value}
+                        </p>
+                        <p className="truncate text-[10px] text-muted-foreground">
+                          {token.role}
+                        </p>
+                      </div>
+                    </label>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      onClick={() => void handleCopyTokenHex(token.name, value)}
+                      title={`Sao chép mã ${value}`}
+                      aria-label={`Sao chép mã màu ${token.name}`}
+                      className="shrink-0 text-muted-foreground hover:text-primary"
+                    >
+                      <Copy className="size-3.5" aria-hidden="true" />
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Apply / Reset Theme Actions */}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3.5">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isSavingTheme}
+              onClick={async () => {
+                const resetColors = { ...DEFAULT_BRAND_THEME };
+                updateField("brandTheme", resetColors);
+                if (onBrandThemeCommitted) {
+                  setIsSavingTheme(true);
+                  try {
+                    await onBrandThemeCommitted(resetColors);
+                    toast({
+                      title: "Đã khôi phục màu mặc định Modern Academic",
+                      variant: "info",
+                    });
+                  } finally {
+                    setIsSavingTheme(false);
+                  }
+                }
+              }}
+              className="h-8 px-3 text-xs"
+            >
+              <RotateCcw className="size-3.5" aria-hidden="true" />
+              Mặc định
+            </Button>
+            {onBrandThemeCommitted && (
+              <Button
                 type="button"
-                onClick={() => void handleCopyTokenHex(token.name, token.hex)}
-                className="group rounded-xl border border-border bg-background p-2.5 text-left transition-colors hover:border-primary/40"
+                size="sm"
+                disabled={isSavingTheme}
+                onClick={async () => {
+                  setIsSavingTheme(true);
+                  try {
+                    await onBrandThemeCommitted(draft.brandTheme);
+                    toast({
+                      title: "Đã lưu & áp dụng bảng màu toàn hệ thống",
+                      description:
+                        "Màu sắc mới đã đồng bộ cho trang Quản trị, Trang chủ công khai và Cổng Học sinh.",
+                      variant: "success",
+                    });
+                  } catch (err) {
+                    toast({
+                      title: "Không thể lưu bảng màu",
+                      description:
+                        err instanceof Error ? err.message : "Vui lòng thử lại.",
+                      variant: "error",
+                    });
+                  } finally {
+                    setIsSavingTheme(false);
+                  }
+                }}
+                className="h-8 px-3.5 text-xs"
               >
-                <div
-                  className="h-8 w-full rounded-lg border border-black/10"
-                  style={{ backgroundColor: token.hex }}
-                />
-                <div className="mt-1.5 flex items-center justify-between gap-1">
-                  <p className="truncate text-[11px] font-semibold text-foreground">
-                    {token.name}
-                  </p>
-                  <Copy
-                    className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                    aria-hidden="true"
-                  />
-                </div>
-                <p className="font-mono text-[10px] text-muted-foreground">
-                  {token.hex}
-                </p>
-                <p className="mt-0.5 line-clamp-1 text-[10px] text-muted-foreground">
-                  {token.role}
-                </p>
-              </button>
-            ))}
+                {isSavingTheme ? (
+                  <>
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                    Đang lưu...
+                  </>
+                ) : (
+                  <>
+                    <Save className="size-3.5" aria-hidden="true" />
+                    Áp dụng &amp; Lưu màu
+                  </>
+                )}
+              </Button>
+            )}
           </div>
         </section>
       </div>

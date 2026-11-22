@@ -44,7 +44,7 @@ export function SiteFooter() {
   }, []);
 
   return (
-    <footer className="relative mt-16 overflow-hidden bg-[#1E3458] text-white">
+    <footer className="relative mt-16 overflow-hidden bg-deep-navy text-white transition-colors">
       {/* Main 4-Column Footer Grid */}
       <div className="mx-auto max-w-[1360px] px-4 py-12 sm:px-8 lg:px-10">
         <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-12 lg:divide-x lg:divide-white/10">
@@ -132,8 +132,8 @@ export function SiteFooter() {
             <div className="mt-4 flex items-center gap-2.5">
               <Link
                 href="/podcast"
-                aria-label="Spotify Podcast @minhanh.notes"
-                title="Podcast Học thuật (@minhanh.notes)"
+                aria-label="Podcast Học thuật"
+                title="Podcast Học thuật"
                 className="flex size-9 items-center justify-center rounded-full border border-white/20 bg-white/10 text-white transition-colors hover:border-[#D9AE54] hover:bg-[#D9AE54] hover:text-[#1E3458]"
               >
                 <Headphones className="size-4" aria-hidden="true" />
@@ -226,7 +226,7 @@ export function SiteFooter() {
       </div>
 
       {/* Bottom Copyright & Policy Links */}
-      <div className="border-t border-white/10 bg-[#182B49]">
+      <div className="border-t border-white/10 bg-footer-dark transition-colors">
         <div className="mx-auto flex max-w-[1360px] flex-col items-center justify-between gap-3 px-4 py-4 text-xs text-white/70 sm:flex-row sm:px-8 lg:px-10">
           <p>© 2026 English Manager · {profile.name}. All rights reserved.</p>
           <div className="flex flex-wrap items-center gap-3">
@@ -239,15 +239,15 @@ export function SiteFooter() {
               </span>
             ))}
             <span className="text-white/25">|</span>
-            <Link href="/student" className="transition-colors hover:text-white">
+            <Link href="/privacy" className="transition-colors hover:text-white">
               Chính sách bảo mật
             </Link>
             <span className="text-white/25">|</span>
-            <Link href="/documents" className="transition-colors hover:text-white">
+            <Link href="/terms" className="transition-colors hover:text-white">
               Điều khoản sử dụng
             </Link>
             <span className="text-white/25">|</span>
-            <Link href="/login" className="transition-colors hover:text-white">
+            <Link href="/support" className="transition-colors hover:text-white">
               Hỗ trợ
             </Link>
           </div>

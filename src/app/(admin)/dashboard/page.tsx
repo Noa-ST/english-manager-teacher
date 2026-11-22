@@ -85,6 +85,23 @@ export default function AdminDashboardPage() {
       .catch(() => {});
   }, []);
 
+  const [teacherName, setTeacherName] = React.useState("");
+  const [currentTerm, setCurrentTerm] = React.useState("");
+
+  React.useEffect(() => {
+    let active = true;
+    apiRequest<{ name?: string; currentTerm?: string }>("/api/admin/settings")
+      .then((res) => {
+        if (!active || !res) return;
+        if (res.name?.trim()) setTeacherName(res.name.trim());
+        if (res.currentTerm?.trim()) setCurrentTerm(res.currentTerm.trim());
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // Computed metrics using unified dashboard service
   const metrics = React.useMemo(() => {
     return computeDashboardMetrics({
@@ -181,12 +198,12 @@ export default function AdminDashboardPage() {
       {/* Top Workspace Header */}
       <div className="flex flex-col justify-between gap-4 border-b border-border pb-5 sm:flex-row sm:items-end">
         <div>
-          <p className="font-mono text-[11px] font-semibold tracking-widest text-[#496B9A] uppercase">
-            Học kỳ I · Tuần thực tế ({formatShortDateVi(currentWeekStart)} –{" "}
+          <p className="font-mono text-[11px] font-semibold tracking-widest text-primary-accent uppercase">
+            {currentTerm ? `${currentTerm} · ` : ""}Tuần thực tế ({formatShortDateVi(currentWeekStart)} –{" "}
             {formatShortDateVi(currentWeekEnd)}/{currentWeekEnd.slice(0, 4)})
           </p>
           <h1 className="mt-1 font-heading text-2xl font-bold text-foreground sm:text-3xl">
-            Tổng quan Học vụ — ThS. Nguyễn Minh Anh
+            Tổng quan Học vụ{teacherName ? ` — ${teacherName}` : ""}
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Hôm nay có{" "}

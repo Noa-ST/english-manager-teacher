@@ -16,6 +16,7 @@
   /* Brand & Semantic Extensions */
   --color-navy: var(--brand-navy);
   --color-deep-navy: var(--brand-deep-navy);
+  --color-footer-dark: var(--brand-footer-dark);
   --color-blue: var(--brand-blue);
   --color-sky: var(--brand-sky);
   --color-soft-blue: var(--brand-soft-blue);
@@ -71,6 +72,7 @@
   /* Layer 1: Primitive Brand Palette (Academic Editorial & Modern Learning Community) */
   --brand-navy: #243b64;
   --brand-deep-navy: #1e3458;
+  --brand-footer-dark: #182b49;
   --brand-blue: #496b9a;
   --brand-sky: #b9d8f5;
   --brand-soft-blue: #eaf0fa;

@@ -36,8 +36,8 @@ export function AudioPlayer({
   episode,
   compact = false,
   className,
-  hostName = "ThS. Nguyễn Minh Anh",
-  hostAvatarUrl = "/images/teacher-avatar.jpg",
+  hostName = "",
+  hostAvatarUrl = "",
   onTimeUpdate,
   onPrevEpisode,
   onNextEpisode,
@@ -257,7 +257,7 @@ export function AudioPlayer({
       >
         {audioElement}
         {/* Left Deep Navy Podcast Cover Plate */}
-        <div className="relative flex min-h-[122px] w-[118px] shrink-0 flex-col justify-between overflow-hidden rounded-xl bg-gradient-to-br from-[#243B64] to-[#182B49] p-3.5 text-white shadow-xs sm:w-[126px]">
+        <div className="relative flex min-h-[122px] w-[118px] shrink-0 flex-col justify-between overflow-hidden rounded-xl bg-gradient-to-br from-primary to-footer-dark p-3.5 text-white shadow-xs sm:w-[126px]">
           <div className="relative z-10">
             <p className="font-serif text-base leading-[1.1] font-bold tracking-tight text-white">
               English
@@ -332,7 +332,7 @@ export function AudioPlayer({
               whileTap={{ scale: 0.95 }}
               onClick={togglePlay}
               aria-label={isPlaying ? "Tạm dừng" : "Phát tập podcast"}
-              className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[#243B64] text-white shadow-xs transition-colors hover:bg-[#1E3458]"
+              className="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-xs transition-colors hover:bg-deep-navy"
             >
               {isPlaying ? (
                 <Pause className="size-3.5" aria-hidden="true" />
@@ -349,9 +349,9 @@ export function AudioPlayer({
               value={Math.floor(currentTime)}
               onChange={handleSeek}
               aria-label="Thanh tiến độ phát âm thanh"
-              className="h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-[#E3E7EF] accent-[#243B64]"
+              className="h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-border accent-primary"
               style={{
-                background: `linear-gradient(to right, #243B64 ${progressPercent}%, #E3E7EF ${progressPercent}%)`,
+                background: `linear-gradient(to right, var(--primary) ${progressPercent}%, var(--border) ${progressPercent}%)`,
               }}
             />
 

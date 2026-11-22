@@ -178,8 +178,8 @@ export function HomeMediaHubSection({
                         className={cn(
                           "rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
                           active
-                            ? "bg-[#243B64] font-semibold text-white"
-                            : "border border-[#E3E7EF] bg-white text-[#556075] hover:border-[#243B64]/40 hover:text-[#243B64]",
+                            ? "bg-primary font-semibold text-primary-foreground"
+                            : "border border-border bg-white text-muted-foreground hover:border-primary/40 hover:text-primary",
                         )}
                       >
                         Tập {ep.episodeNumber} ({ep.durationLabel})

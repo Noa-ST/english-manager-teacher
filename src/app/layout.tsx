@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Be_Vietnam_Pro, Caveat, Geist_Mono, Inter, Lora } from "next/font/google";
 
 import "./globals.css";
+import { BrandThemeSync } from "@/components/shared/brand-theme-sync";
 
 // Be Vietnam Pro: crafted specifically for Vietnamese diacritics & modern editorial headings.
 const fontHeading = Be_Vietnam_Pro({
@@ -44,11 +45,11 @@ const fontMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "English Manager · ThS. Nguyễn Minh Anh",
+    default: "English Manager · Academic English & Mentorship",
     template: "%s · English Manager",
   },
   description:
-    "Nền tảng học thuật, bản tin Podcast, thư viện tài liệu và quản lý lớp học tiếng Anh chuyên sâu của cô Minh Anh (M.A. TESOL).",
+    "Nền tảng học thuật, bản tin Podcast, thư viện tài liệu và quản lý lớp học tiếng Anh chuyên sâu.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -57,7 +58,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="vi"
       className={`${fontHeading.variable} ${fontSerif.variable} ${fontScript.variable} ${fontSans.variable} ${fontMono.variable} h-full antialiased`}
     >
-      <body className="flex min-h-full flex-col bg-background text-foreground">{children}</body>
+      <body className="flex min-h-full flex-col bg-background text-foreground">
+        <BrandThemeSync />
+        {children}
+      </body>
     </html>
   );
 }

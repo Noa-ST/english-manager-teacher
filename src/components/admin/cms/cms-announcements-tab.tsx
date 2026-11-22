@@ -3,7 +3,9 @@
 import * as React from "react";
 import {
   Bold,
+  Check,
   CheckCircle2,
+  ChevronDown,
   Download,
   Edit3,
   Eye,
@@ -22,6 +24,7 @@ import {
   Send,
   Trash2,
   UploadCloud,
+  X,
 } from "lucide-react";
 import type {
   AnnouncementAttachment,
@@ -82,6 +85,23 @@ export function CmsAnnouncementsTab({
   const [annTargetClasses, setAnnTargetClasses] = React.useState<string[]>([
     "Tất cả các lớp",
   ]);
+  const [classDropdownOpen, setClassDropdownOpen] = React.useState(false);
+  const [classSearchText, setClassSearchText] = React.useState("");
+  const classDropdownRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    if (!classDropdownOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        classDropdownRef.current &&
+        !classDropdownRef.current.contains(event.target as Node)
+      ) {
+        setClassDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [classDropdownOpen]);
   const [annContentText, setAnnContentText] = React.useState("");
   const [annAttachments, setAnnAttachments] = React.useState<
     AnnouncementAttachment[]
@@ -803,32 +823,143 @@ export function CmsAnnouncementsTab({
             </div>
           </div>
 
-          {/* Target Classes Multi-Select */}
+          {/* Target Classes Multi-Select Dropdown */}
           <div className="space-y-2 rounded-xl border border-border bg-muted/20 p-3.5">
-            <span className="block text-xs font-semibold text-foreground">
-              Lớp học áp dụng (Target Classes)
-            </span>
-            <div className="flex flex-wrap gap-1.5">
-              {["Tất cả các lớp", ...classroomsList.map((c) => c.name)].map(
-                (label) => {
-                  const selected = annTargetClasses.includes(label);
-                  return (
-                    <button
-                      key={label}
-                      type="button"
-                      onClick={() => toggleTargetClass(label)}
-                      className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
-                        selected
-                          ? "border-primary bg-primary text-primary-foreground"
-                          : "border-border bg-background text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  );
-                },
+            <div className="flex items-center justify-between gap-2">
+              <span className="block text-xs font-semibold text-foreground">
+                Lớp học áp dụng (Target Classes)
+              </span>
+              {!annTargetClasses.includes("Tất cả các lớp") && (
+                <button
+                  type="button"
+                  onClick={() => setAnnTargetClasses(["Tất cả các lớp"])}
+                  className="text-[11px] font-medium text-primary hover:underline"
+                >
+                  Đặt lại: Tất cả các lớp
+                </button>
               )}
             </div>
+
+            <div className="relative" ref={classDropdownRef}>
+              <button
+                type="button"
+                onClick={() => setClassDropdownOpen((o) => !o)}
+                aria-expanded={classDropdownOpen}
+                className="flex h-9 w-full items-center justify-between gap-2 rounded-xl border border-input bg-background px-3 text-left text-xs font-medium text-foreground transition-colors hover:border-primary/50 focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                <span className="truncate">
+                  {annTargetClasses.includes("Tất cả các lớp")
+                    ? "Tất cả các lớp (Toàn trung tâm)"
+                    : annTargetClasses.length === 1
+                      ? annTargetClasses[0]
+                      : `Đã chọn ${annTargetClasses.length} lớp học`}
+                </span>
+                <ChevronDown
+                  className={`size-4 shrink-0 text-muted-foreground transition-transform ${
+                    classDropdownOpen ? "rotate-180" : ""
+                  }`}
+                  aria-hidden="true"
+                />
+              </button>
+
+              {classDropdownOpen && (
+                <div className="absolute right-0 left-0 z-30 mt-1.5 overflow-hidden rounded-xl border border-border bg-card shadow-lg">
+                  <div className="border-b border-border p-2">
+                    <div className="relative">
+                      <Search
+                        className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                      <Input
+                        type="search"
+                        value={classSearchText}
+                        onChange={(e) => setClassSearchText(e.target.value)}
+                        placeholder="Tìm theo mã lớp hoặc tên lớp..."
+                        className="h-8 pl-8 text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="max-h-52 overflow-y-auto p-1.5 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        toggleTargetClass("Tất cả các lớp");
+                        setClassDropdownOpen(false);
+                      }}
+                      className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left transition-colors ${
+                        annTargetClasses.includes("Tất cả các lớp")
+                          ? "bg-primary/10 font-semibold text-primary"
+                          : "text-foreground hover:bg-muted/60"
+                      }`}
+                    >
+                      <span>Tất cả các lớp (Toàn trung tâm)</span>
+                      {annTargetClasses.includes("Tất cả các lớp") && (
+                        <Check className="size-3.5 shrink-0" aria-hidden="true" />
+                      )}
+                    </button>
+
+                    <div className="my-1 border-t border-border/60" />
+
+                    {classroomsList
+                      .filter((cls) => {
+                        const q = classSearchText.trim().toLowerCase();
+                        if (!q) return true;
+                        return (
+                          cls.name.toLowerCase().includes(q) ||
+                          cls.code.toLowerCase().includes(q)
+                        );
+                      })
+                      .map((cls) => {
+                        const selected = annTargetClasses.includes(cls.name);
+                        return (
+                          <button
+                            key={cls.id}
+                            type="button"
+                            onClick={() => toggleTargetClass(cls.name)}
+                            className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                              selected
+                                ? "bg-primary/10 font-semibold text-primary"
+                                : "text-foreground hover:bg-muted/60"
+                            }`}
+                          >
+                            <span className="truncate">
+                              <span className="font-mono text-[11px] text-muted-foreground">
+                                {cls.code}
+                              </span>{" "}
+                              — {cls.name}
+                            </span>
+                            {selected && (
+                              <Check className="size-3.5 shrink-0" aria-hidden="true" />
+                            )}
+                          </button>
+                        );
+                      })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {!annTargetClasses.includes("Tất cả các lớp") && (
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {annTargetClasses.map((label) => (
+                  <span
+                    key={label}
+                    className="inline-flex items-center gap-1 rounded-lg border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
+                  >
+                    <span>{label}</span>
+                    <button
+                      type="button"
+                      onClick={() => toggleTargetClass(label)}
+                      aria-label={`Bỏ chọn lớp ${label}`}
+                      className="rounded-full p-0.5 hover:bg-primary/20"
+                    >
+                      <X className="size-3" aria-hidden="true" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Rich Text Formatting Toolbar */}

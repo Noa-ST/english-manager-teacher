@@ -62,6 +62,10 @@ export const GRADE_COMMENT_CHIPS: GradeCommentChip[] = [
 
 export interface AssessmentSummaryItem {
   title: string;
+  classroomId?: string | null;
+  classCode?: string | null;
+  className?: string | null;
+  examDate?: string | null;
   gradedCount: number;
   publishedCount: number;
   draftCount: number;

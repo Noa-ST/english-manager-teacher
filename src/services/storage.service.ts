@@ -2835,3 +2835,451 @@ export async function recordPublicResourceDownload(id: unknown): Promise<{
     publicUrl: updated.publicUrl ?? null,
   };
 }
+
+// -----------------------------------------------------------------------------
+//  AUTO-CLEANUP REPLACED / DELETED CLOUDINARY IMAGES
+// -----------------------------------------------------------------------------
+
+const CLOUDINARY_TRANSFORM_SEGMENT_RE =
+  /^(?:[a-z]{1,3}_[^/,]+)(?:,[a-z]{1,3}_[^/,]+)*$/i;
+
+/**
+ * Extracts a Cloudinary `public_id` from a Cloudinary delivery URL or a bare
+ * `english-manager/...` object key. Returns `null` for external URLs (e.g.
+ * Unsplash) or local static assets (e.g. `/images/teacher-avatar.jpg`).
+ */
+export function extractCloudinaryPublicIdFromUrl(
+  urlOrKey?: string | null,
+): string | null {
+  if (!urlOrKey) return null;
+  const trimmed = urlOrKey.trim();
+  if (!trimmed) return null;
+
+  // Bare Cloudinary key under our app folder
+  if (trimmed.startsWith("english-manager/")) {
+    return trimmed.replace(/\.[a-z0-9]{2,5}$/i, "");
+  }
+
+  // Must be a Cloudinary delivery URL
+  if (!/^https?:\/\/res\.cloudinary\.com\//i.test(trimmed)) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const marker = "/image/upload/";
+    const idx = parsed.pathname.indexOf(marker);
+    if (idx === -1) return null;
+
+    const rest = parsed.pathname.slice(idx + marker.length);
+    const segments = rest.split("/").filter(Boolean);
+
+    // Strip leading transformation segments (e.g. c_fill,w_800,f_auto,q_auto)
+    while (
+      segments.length > 1 &&
+      CLOUDINARY_TRANSFORM_SEGMENT_RE.test(segments[0])
+    ) {
+      segments.shift();
+    }
+
+    // Strip version segment (e.g. v1732291234)
+    if (segments.length > 1 && /^v\d+$/.test(segments[0])) {
+      segments.shift();
+    }
+
+    if (segments.length === 0) return null;
+    const joined = decodeURIComponent(segments.join("/"));
+    return joined.replace(/\.[a-z0-9]{2,5}$/i, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Safely deletes a replaced or removed Cloudinary image AFTER the parent DB
+ * update/delete has already succeeded.
+ *
+ * Safety guarantees:
+ * 1. Ignores non-Cloudinary URLs (Unsplash, local `/images/...`, etc.).
+ * 2. No-op when the old and new public IDs are identical.
+ * 3. Checks remaining references across StudentProject, PodcastEpisode, and
+ *    TeacherSetting before deleting so shared images are never broken.
+ * 4. Best-effort: never throws to the caller — if Cloudinary fails transiently,
+ *    the asset is queued in `orphaned_storage_files` for later cleanup.
+ */
+export async function cleanupReplacedCloudinaryImage(params: {
+  oldUrl?: string | null;
+  oldPublicId?: string | null;
+  newUrl?: string | null;
+  newPublicId?: string | null;
+  actorId?: string;
+  reason?: string;
+}): Promise<{ deleted: boolean; skippedReason?: string; publicId?: string }> {
+  const oldPublicId =
+    params.oldPublicId?.trim() ||
+    extractCloudinaryPublicIdFromUrl(params.oldUrl);
+  if (!oldPublicId) {
+    return { deleted: false, skippedReason: "not-cloudinary" };
+  }
+
+  const newPublicId =
+    params.newPublicId?.trim() ||
+    extractCloudinaryPublicIdFromUrl(params.newUrl);
+  if (newPublicId && newPublicId === oldPublicId) {
+    return { deleted: false, skippedReason: "unchanged", publicId: oldPublicId };
+  }
+
+  try {
+    // 1. Check if any other record still references this Cloudinary public_id
+    const [projectRefs, podcastRefs, settingRefs] = await Promise.all([
+      prisma.studentProject.count({
+        where: {
+          OR: [
+            { posterPublicId: oldPublicId },
+            { posterUrl: { contains: oldPublicId } },
+          ],
+        },
+      }),
+      prisma.podcastEpisode.count({
+        where: { thumbnailKey: { contains: oldPublicId } },
+      }),
+      prisma.teacherSetting.count({
+        where: { avatarUrl: { contains: oldPublicId } },
+      }),
+    ]);
+
+    if (projectRefs + podcastRefs + settingRefs > 0) {
+      return {
+        deleted: false,
+        skippedReason: "still-referenced",
+        publicId: oldPublicId,
+      };
+    }
+
+    // 2. Find matching StoredFile metadata row(s) if tracked
+    const storedRow = await prisma.storedFile.findFirst({
+      where: {
+        provider: "cloudinary",
+        OR: [
+          { cloudinaryPublicId: oldPublicId },
+          { storagePath: oldPublicId },
+          ...(params.oldUrl ? [{ publicUrl: params.oldUrl }] : []),
+        ],
+      },
+      select: { id: true, storagePath: true, cloudinaryPublicId: true },
+    });
+
+    const targetPublicId = storedRow?.cloudinaryPublicId ?? oldPublicId;
+    const targetPath = storedRow?.storagePath ?? oldPublicId;
+
+    // 3. Delete asset on Cloudinary
+    const provider = getStorageProvider("cloudinary");
+    try {
+      await provider.delete({
+        storagePath: targetPath,
+        cloudinaryPublicId: targetPublicId,
+        visibility: "public",
+      });
+    } catch (cloudErr) {
+      // Enqueue as orphan for retry in /storage so parent save never breaks
+      await prisma.orphanedStorageFile
+        .create({
+          data: {
+            id: `orph-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            provider: "cloudinary",
+            bucketName: null,
+            storagePath: targetPath,
+            cloudinaryPublicId: targetPublicId,
+            reason: `Auto-cleanup failed (${params.reason ?? "image-replaced"}): ${
+              cloudErr instanceof Error ? cloudErr.message : "unknown"
+            }`,
+          },
+        })
+        .catch(() => {});
+
+      await recordAuditLog({
+        action: "DELETE_FILE",
+        provider: "cloudinary",
+        actorId: params.actorId ?? "admin",
+        targetId: storedRow?.id ?? targetPublicId,
+        targetPath,
+        status: "FAILED",
+        detail: `Không thể xóa tự động ảnh cũ trên Cloudinary (${params.reason ?? "đổi ảnh"}) — đã đưa vào hàng đợi dọn tệp mồ côi.`,
+      }).catch(() => {});
+
+      return {
+        deleted: false,
+        skippedReason: "queued-as-orphan",
+        publicId: targetPublicId,
+      };
+    }
+
+    // 4. Remove matching StoredFile row(s) in PostgreSQL
+    if (storedRow) {
+      await prisma.storedFile
+        .delete({ where: { id: storedRow.id } })
+        .catch(() => {});
+    }
+
+    await recordAuditLog({
+      action: "DELETE_FILE",
+      provider: "cloudinary",
+      actorId: params.actorId ?? "admin",
+      targetId: storedRow?.id ?? targetPublicId,
+      targetPath,
+      status: "SUCCESS",
+      detail: `Tự động xóa ảnh cũ trên Cloudinary để tiết kiệm dung lượng (${params.reason ?? "đổi ảnh"}).`,
+    }).catch(() => {});
+
+    return { deleted: true, publicId: targetPublicId };
+  } catch {
+    return {
+      deleted: false,
+      skippedReason: "unexpected-error",
+      publicId: oldPublicId,
+    };
+  }
+}
+
+// -----------------------------------------------------------------------------
+//  AUTO-CLEANUP REPLACED / DELETED SUPABASE STORAGE FILES (AUDIO / PDF / DOCS)
+// -----------------------------------------------------------------------------
+
+const SUPABASE_BARE_KEY_PREFIXES = [
+  "podcasts/",
+  "documents/",
+  "resources/",
+  "attachments/",
+  "curriculum/",
+];
+
+/**
+ * Extracts `{ bucket, storagePath, visibility }` from a Supabase Storage URL
+ * or a bare object key (`podcasts/...`, `documents/...`, etc.).
+ * Returns `null` for external non-Supabase URLs (e.g. `https://example.com/...`)
+ * or local relative paths.
+ */
+export function extractSupabaseStorageTarget(
+  urlOrKey?: string | null,
+  fallbackPublicBucket = "english-manager-public",
+  privateBucketName = "english-manager-private",
+): { bucket: string; storagePath: string; visibility: "public" | "private" } | null {
+  if (!urlOrKey) return null;
+  const trimmed = urlOrKey.trim();
+  if (!trimmed) return null;
+
+  // Bare Supabase storage key
+  if (
+    !trimmed.startsWith("http://") &&
+    !trimmed.startsWith("https://") &&
+    !trimmed.startsWith("/")
+  ) {
+    const cleanKey = trimmed.replace(/^\/+/, "");
+    if (
+      SUPABASE_BARE_KEY_PREFIXES.some((prefix) => cleanKey.startsWith(prefix))
+    ) {
+      return {
+        bucket: fallbackPublicBucket,
+        storagePath: cleanKey,
+        visibility: "public",
+      };
+    }
+    return null;
+  }
+
+  // Must be a Supabase Storage URL
+  if (!/^https?:\/\/[^/]*supabase\.co\/storage\/v1\/object\//i.test(trimmed)) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    // Matches /storage/v1/object/(public|sign|authenticated)/<bucket>/<path...>
+    const match = parsed.pathname.match(
+      /^\/storage\/v1\/object\/(?:public|sign|authenticated)\/([^/]+)\/(.+)$/i,
+    );
+    if (!match) return null;
+
+    const bucket = decodeURIComponent(match[1]);
+    const storagePath = decodeURIComponent(match[2]).replace(/^\/+/, "");
+    if (!bucket || !storagePath) return null;
+
+    const visibility: "public" | "private" =
+      bucket === privateBucketName ? "private" : "public";
+    return { bucket, storagePath, visibility };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Safely deletes a replaced or removed Supabase Storage object (MP3/M4A audio,
+ * PDF document, attachment) AFTER the parent DB update/delete has succeeded.
+ *
+ * Safety guarantees:
+ * 1. Ignores non-Supabase external URLs.
+ * 2. No-op when old and new storagePath are identical.
+ * 3. Checks remaining references across PodcastEpisode, StudentProject,
+ *    AnnouncementAttachment, and ResourceFile before deleting.
+ * 4. Best-effort: never throws to the caller — on transient Supabase failure,
+ *    enqueues into `orphaned_storage_files` for later cleanup.
+ */
+export async function cleanupReplacedSupabaseFile(params: {
+  oldUrl?: string | null;
+  oldKey?: string | null;
+  newUrl?: string | null;
+  newKey?: string | null;
+  actorId?: string;
+  reason?: string;
+}): Promise<{ deleted: boolean; skippedReason?: string; storagePath?: string }> {
+  const env = getServerEnv();
+  const publicBucket = env.SUPABASE_PUBLIC_BUCKET;
+  const privateBucket = env.SUPABASE_PRIVATE_BUCKET;
+
+  const oldTarget =
+    extractSupabaseStorageTarget(params.oldUrl, publicBucket, privateBucket) ??
+    extractSupabaseStorageTarget(params.oldKey, publicBucket, privateBucket);
+  if (!oldTarget) {
+    return { deleted: false, skippedReason: "not-supabase" };
+  }
+
+  const newTarget =
+    extractSupabaseStorageTarget(params.newUrl, publicBucket, privateBucket) ??
+    extractSupabaseStorageTarget(params.newKey, publicBucket, privateBucket);
+  if (newTarget && newTarget.storagePath === oldTarget.storagePath) {
+    return {
+      deleted: false,
+      skippedReason: "unchanged",
+      storagePath: oldTarget.storagePath,
+    };
+  }
+
+  try {
+    // 1. Check remaining references across all domain tables
+    const [podcastRefs, projectRefs, attachmentRefs, resourceRefs] =
+      await Promise.all([
+        prisma.podcastEpisode.count({
+          where: {
+            OR: [
+              { audioKey: oldTarget.storagePath },
+              { audioUrl: { contains: oldTarget.storagePath } },
+            ],
+          },
+        }),
+        prisma.studentProject.count({
+          where: { documentUrl: { contains: oldTarget.storagePath } },
+        }),
+        prisma.announcementAttachment.count({
+          where: {
+            OR: [
+              { objectKey: oldTarget.storagePath },
+              { url: { contains: oldTarget.storagePath } },
+            ],
+          },
+        }),
+        prisma.resourceFile.count({
+          where: {
+            deletedAt: null,
+            OR: [
+              { objectKey: oldTarget.storagePath },
+              { publicUrl: { contains: oldTarget.storagePath } },
+            ],
+          },
+        }),
+      ]);
+
+    if (podcastRefs + projectRefs + attachmentRefs + resourceRefs > 0) {
+      return {
+        deleted: false,
+        skippedReason: "still-referenced",
+        storagePath: oldTarget.storagePath,
+      };
+    }
+
+    // 2. Find matching StoredFile metadata row if tracked
+    const storedRow = await prisma.storedFile.findFirst({
+      where: {
+        provider: "supabase",
+        OR: [
+          { storagePath: oldTarget.storagePath },
+          ...(params.oldUrl ? [{ publicUrl: params.oldUrl }] : []),
+        ],
+      },
+      select: { id: true, bucketName: true, storagePath: true, isPublic: true },
+    });
+
+    const targetBucket = storedRow?.bucketName ?? oldTarget.bucket;
+    const targetPath = storedRow?.storagePath ?? oldTarget.storagePath;
+    const targetVisibility: "public" | "private" = storedRow
+      ? storedRow.isPublic
+        ? "public"
+        : "private"
+      : oldTarget.visibility;
+
+    // 3. Delete object on Supabase Storage
+    const provider = getStorageProvider("supabase");
+    try {
+      await provider.delete({
+        bucket: targetBucket,
+        storagePath: targetPath,
+        visibility: targetVisibility,
+      });
+    } catch (cloudErr) {
+      await prisma.orphanedStorageFile
+        .create({
+          data: {
+            id: `orph-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            provider: "supabase",
+            bucketName: targetBucket,
+            storagePath: targetPath,
+            cloudinaryPublicId: null,
+            reason: `Auto-cleanup failed (${params.reason ?? "file-replaced"}): ${
+              cloudErr instanceof Error ? cloudErr.message : "unknown"
+            }`,
+          },
+        })
+        .catch(() => {});
+
+      await recordAuditLog({
+        action: "DELETE_FILE",
+        provider: "supabase",
+        actorId: params.actorId ?? "admin",
+        targetId: storedRow?.id ?? targetPath,
+        targetPath,
+        status: "FAILED",
+        detail: `Không thể xóa tự động tệp cũ trên Supabase Storage (${params.reason ?? "đổi tệp"}) — đã đưa vào hàng đợi dọn tệp mồ côi.`,
+      }).catch(() => {});
+
+      return {
+        deleted: false,
+        skippedReason: "queued-as-orphan",
+        storagePath: targetPath,
+      };
+    }
+
+    // 4. Clean matching StoredFile metadata row
+    if (storedRow) {
+      await prisma.storedFile
+        .delete({ where: { id: storedRow.id } })
+        .catch(() => {});
+    }
+
+    await recordAuditLog({
+      action: "DELETE_FILE",
+      provider: "supabase",
+      actorId: params.actorId ?? "admin",
+      targetId: storedRow?.id ?? targetPath,
+      targetPath,
+      status: "SUCCESS",
+      detail: `Tự động xóa tệp cũ trên Supabase Storage để tiết kiệm dung lượng (${params.reason ?? "đổi tệp"}).`,
+    }).catch(() => {});
+
+    return { deleted: true, storagePath: targetPath };
+  } catch {
+    return {
+      deleted: false,
+      skippedReason: "unexpected-error",
+      storagePath: oldTarget.storagePath,
+    };
+  }
+}

@@ -36,7 +36,7 @@ export function HomeHeroSection({
     [teacher.credentials],
   );
 
-  const avatarSrc = teacher.avatarUrl?.trim() || "/images/teacher-avatar.jpg";
+  const avatarSrc = teacher.avatarUrl?.trim() || "";
   const isRemoteAvatar =
     avatarSrc.startsWith("http://") || avatarSrc.startsWith("https://");
   const isAdmin = currentUser?.role === "admin";
@@ -86,7 +86,7 @@ export function HomeHeroSection({
               {isAdmin ? (
                 <Button
                   size="lg"
-                  className="group h-11 rounded-full bg-[#243B64] px-6 text-xs font-semibold text-white shadow-sm transition-all hover:bg-[#1E3458] sm:h-12 sm:text-sm"
+                  className="group h-11 rounded-full bg-primary px-6 text-xs font-semibold text-primary-foreground shadow-sm transition-all hover:bg-deep-navy sm:h-12 sm:text-sm"
                   render={<Link href="/dashboard" />}
                   nativeButton={false}
                 >
@@ -100,7 +100,7 @@ export function HomeHeroSection({
               ) : (
                 <Button
                   size="lg"
-                  className="group h-11 rounded-full bg-[#243B64] px-6 text-xs font-semibold text-white shadow-sm transition-all hover:bg-[#1E3458] sm:h-12 sm:text-sm"
+                  className="group h-11 rounded-full bg-primary px-6 text-xs font-semibold text-primary-foreground shadow-sm transition-all hover:bg-deep-navy sm:h-12 sm:text-sm"
                   render={<Link href="/student" />}
                   nativeButton={false}
                 >
@@ -181,7 +181,9 @@ export function HomeHeroSection({
 
               {/* Main Curved Portrait Container (overflow-hidden only clips the image, NOT the floating badge!) */}
               <div className="relative h-full w-full overflow-hidden rounded-2xl border-2 border-[#E4D3B2] bg-[#EADBC0] shadow-md lg:rounded-l-[240px] lg:rounded-r-none lg:border-y-0 lg:border-r-0 lg:border-l-4 lg:border-l-[#E4D3B2] lg:shadow-none">
-                {isRemoteAvatar ? (
+                {!avatarSrc ? (
+                  <div className="size-full animate-pulse bg-warm/80" aria-hidden="true" />
+                ) : isRemoteAvatar ? (
                   /* eslint-disable-next-line @next/next/no-img-element */
                   <img
                     src={avatarSrc}

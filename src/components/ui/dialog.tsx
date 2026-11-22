@@ -12,7 +12,8 @@ interface ModalDialogProps {
   description?: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
-  size?: "sm" | "md" | "lg" | "xl";
+  size?: "sm" | "md" | "lg" | "xl" | "2xl" | "full";
+  className?: string;
 }
 
 export function ModalDialog({
@@ -23,6 +24,7 @@ export function ModalDialog({
   children,
   footer,
   size = "md",
+  className,
 }: ModalDialogProps) {
   const titleId = React.useId();
   const descId = React.useId();
@@ -43,6 +45,8 @@ export function ModalDialog({
     md: "max-w-lg",
     lg: "max-w-2xl",
     xl: "max-w-4xl",
+    "2xl": "max-w-6xl",
+    full: "max-w-[96vw]",
   }[size];
 
   return (
@@ -62,6 +66,7 @@ export function ModalDialog({
         className={cn(
           "relative z-10 flex max-h-[90vh] w-full flex-col overflow-hidden rounded-2xl border border-border bg-card text-card-foreground shadow-xl",
           sizeClass,
+          className,
         )}
       >
         <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-6 py-4">

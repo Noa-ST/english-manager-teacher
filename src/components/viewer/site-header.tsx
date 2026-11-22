@@ -21,7 +21,11 @@ import type {
   AnnouncementItem,
   TeacherProfile,
 } from "@/services/classroom-data";
-import { SETTINGS_UPDATED_EVENT } from "@/services/settings-helpers";
+import {
+  persistTeacherBrandLocally,
+  readStoredTeacherBrand,
+  SETTINGS_UPDATED_EVENT,
+} from "@/services/settings-helpers";
 import { selectFeaturedAnnouncements } from "@/services/viewer-home-helpers";
 import { Button } from "@/components/ui/button";
 
@@ -36,7 +40,7 @@ const EMPTY_TEACHER_PROFILE: TeacherProfile = {
   totalStudents: 0,
   bandAchievementRate: "",
   email: "",
-  avatarUrl: "/images/teacher-avatar.jpg",
+  avatarUrl: "",
   officeHours: "",
   location: "",
   socials: [],
@@ -92,6 +96,13 @@ export function SiteHeader() {
   React.useEffect(() => {
     let active = true;
 
+    const cached = readStoredTeacherBrand();
+    if (cached) {
+      Promise.resolve().then(() => {
+        if (active) setBrandProfile((prev) => ({ ...prev, ...cached }));
+      });
+    }
+
     apiRequest<{
       teacher?: TeacherProfile;
       currentTerm?: string;
@@ -101,6 +112,7 @@ export function SiteHeader() {
         if (!active || !res) return;
         if (res.teacher) {
           setBrandProfile(res.teacher);
+          persistTeacherBrandLocally(res.teacher);
         }
         if (res.currentTerm?.trim()) {
           setCurrentTerm(res.currentTerm);
@@ -164,7 +176,10 @@ export function SiteHeader() {
   };
 
   const renderBrandAvatar = (sizes: string, priority = false) => {
-    const src = brandProfile.avatarUrl?.trim() || "/images/teacher-avatar.jpg";
+    const src = brandProfile.avatarUrl?.trim();
+    if (!src) {
+      return <div className="size-full animate-pulse bg-muted/80" aria-hidden="true" />;
+    }
     if (src.startsWith("http://") || src.startsWith("https://")) {
       return (
         /* eslint-disable-next-line @next/next/no-img-element */
@@ -189,8 +204,8 @@ export function SiteHeader() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-[#E3E7EF] bg-white/95 backdrop-blur-md">
-      {/* SECTION 01: TOP ANNOUNCEMENT BAR (Deep Navy #1E3458) */}
-      <div className="bg-[#1E3458] text-xs text-white">
+      {/* SECTION 01: TOP ANNOUNCEMENT BAR (WCAG-Safe Deep Brand Surface) */}
+      <div className="bg-deep-navy text-xs text-white transition-colors">
         <div className="mx-auto flex h-9 max-w-[1360px] items-center justify-between gap-4 px-4 sm:px-8 lg:px-10">
           <div className="flex min-w-0 items-center gap-2 text-white/95">
             <GraduationCap className="size-4 shrink-0 text-[#D9AE54]" aria-hidden="true" />
@@ -231,7 +246,7 @@ export function SiteHeader() {
             {renderBrandAvatar("44px", true)}
           </div>
           <div className="flex flex-col">
-            <span className="font-heading text-[15px] leading-tight font-bold tracking-tight text-[#243B64]">
+            <span className="font-heading text-[15px] leading-tight font-bold tracking-tight text-primary">
               {brandProfile.name}
             </span>
             <span className="text-xs whitespace-nowrap text-[#7B8497]">
@@ -255,8 +270,8 @@ export function SiteHeader() {
                 className={cn(
                   "relative inline-flex h-full shrink-0 items-center px-3 text-sm whitespace-nowrap transition-colors",
                   active
-                    ? "font-bold text-[#243B64] after:absolute after:inset-x-3 after:bottom-0 after:h-[3px] after:rounded-t-full after:bg-[#243B64]"
-                    : "font-medium text-[#253047]/80 hover:text-[#243B64]",
+                    ? "font-bold text-primary after:absolute after:inset-x-3 after:bottom-0 after:h-[3px] after:rounded-t-full after:bg-primary"
+                    : "font-medium text-foreground/80 hover:text-primary",
                 )}
               >
                 {item.label}
@@ -274,7 +289,7 @@ export function SiteHeader() {
                 nativeButton={false}
                 variant="default"
                 size="default"
-                className="h-9 rounded-full bg-[#1E3458] px-4 text-xs font-semibold whitespace-nowrap text-white shadow-2xs hover:bg-[#243B64]"
+                className="h-9 rounded-full bg-deep-navy px-4 text-xs font-semibold whitespace-nowrap text-white shadow-2xs hover:bg-primary"
               >
                 <ShieldCheck className="size-3.5 text-[#D9AE54]" aria-hidden="true" />
                 <span>Bàn làm việc Giáo viên</span>
@@ -296,9 +311,9 @@ export function SiteHeader() {
                 nativeButton={false}
                 variant="default"
                 size="default"
-                className="h-9 rounded-full border border-[#243B64] bg-[#EAF0FA] px-4 text-xs font-semibold whitespace-nowrap text-[#243B64] shadow-2xs hover:bg-[#d8e5f7]"
+                className="h-9 rounded-full border border-primary bg-secondary px-4 text-xs font-semibold whitespace-nowrap text-primary shadow-2xs hover:bg-secondary/80"
               >
-                <GraduationCap className="size-3.5 text-[#243B64]" aria-hidden="true" />
+                <GraduationCap className="size-3.5 text-primary" aria-hidden="true" />
                 <span>Góc học tập ({currentUser.studentCode || currentUser.fullName || "Học sinh"})</span>
               </Button>
               <button
@@ -315,7 +330,7 @@ export function SiteHeader() {
         ) : (
           <div className="relative hidden shrink-0 items-center gap-2 sm:flex" ref={loginDropdownRef}>
             {/* Clean, high-impact "Đăng nhập" Button with quick role popup */}
-            <div className="inline-flex items-center rounded-full bg-[#1E3458] p-0.5 text-white shadow-2xs transition-all hover:bg-[#243B64]">
+            <div className="inline-flex items-center rounded-full bg-deep-navy p-0.5 text-white shadow-2xs transition-all hover:bg-primary">
               <Link
                 href="/login"
                 className="inline-flex h-8 items-center gap-2 px-3.5 text-xs font-semibold text-white focus-visible:outline-none"
@@ -475,7 +490,7 @@ export function SiteHeader() {
                     />
                   }
                   nativeButton={false}
-                  className="h-10 w-full justify-center rounded-lg bg-[#1E3458] text-xs font-semibold text-white"
+                  className="h-10 w-full justify-center rounded-lg bg-deep-navy text-xs font-semibold text-white"
                 >
                   {currentUser.role === "admin" ? "Vào Bàn làm việc" : "Vào Cổng học sinh"}
                 </Button>
@@ -486,7 +501,7 @@ export function SiteHeader() {
                   render={<Link href="/login?role=student" onClick={() => setMobileMenuOpen(false)} />}
                   nativeButton={false}
                   variant="outline"
-                  className="h-11 w-full justify-center gap-2 rounded-lg border-border bg-card text-xs font-semibold text-[#243B64]"
+                  className="h-11 w-full justify-center gap-2 rounded-lg border-border bg-card text-xs font-semibold text-primary"
                 >
                   <GraduationCap className="size-4" aria-hidden="true" />
                   Đăng nhập Học sinh
@@ -495,7 +510,7 @@ export function SiteHeader() {
                   render={<Link href="/login?role=admin" onClick={() => setMobileMenuOpen(false)} />}
                   nativeButton={false}
                   size="default"
-                  className="h-11 w-full justify-center gap-2 rounded-lg bg-[#1E3458] text-xs font-semibold text-white"
+                  className="h-11 w-full justify-center gap-2 rounded-lg bg-deep-navy text-xs font-semibold text-white"
                 >
                   <ShieldCheck className="size-4" aria-hidden="true" />
                   Đăng nhập Giáo viên

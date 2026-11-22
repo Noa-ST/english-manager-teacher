@@ -35,6 +35,8 @@ import {
   parseTargetBand,
 } from "@/services/academic-alert.service";
 import { computeStudentSkillProfile } from "@/services/student-helpers";
+import { parseStudentImportCsv } from "@/services/student-import";
+import { CLASSROOMS_DATA } from "@/services/classroom-data";
 
 import {
   hasTestDatabase,
@@ -359,6 +361,61 @@ describe("Student Service — Pure Helpers, Security & RBAC (Offline)", () => {
       assert.strictEqual(parseTargetBand("Đạt C1 Academic"), null);
       assert.strictEqual(parseTargetBand("Đạt B2 và IELTS 6.5"), 6.5);
       assert.strictEqual(parseTargetBand("IELTS 3.0–3.5+"), 3.0);
+    });
+
+    it("13.11. parseStudentImportCsv đọc chuẩn 16 cột xuất Excel (không nhận nhầm Mã HS thành Họ và tên)", () => {
+      const csv =
+        "\uFEFF" +
+        [
+          "Mã học sinh,Họ và tên,Lớp theo học,Trình độ,Tình trạng học vụ,Điểm TB,Chuyên cần (%),Trạng thái học phí,Ngày nộp học phí,Mức học phí,Kỳ học phí,Phụ huynh,SĐT phụ huynh,Mục tiêu đầu ra,Nhận xét của giáo viên,Ngày nhập học",
+          "HS-2026-09,Lâm Chấn Khang,IELTS Foundation (Band 5.0–6.0),B1,Đang học,5,0%,Quá hạn,20/12/2026,5.200.000,Học kỳ II,Anh Quốc,945332900,IELTS 6.0,,20/11/2026",
+          "HS-2026-08,Bùi Trường Linh,IELTS Foundation (Band 5.0–6.0),B1+,Đang học,6,0%,Sắp đến hạn,20/12/2026,5.200.000,Học kỳ II,Cô Thanh,982774115,IELTS 6.5 (Xét tuyển ĐH),Chăm chỉ,20/11/2026",
+        ].join("\r\n");
+
+      const res = parseStudentImportCsv(csv, CLASSROOMS_DATA, ["HS-2026-01"], "2026-11-22");
+      assert.strictEqual(res.error, undefined);
+      assert.strictEqual(res.rows.length, 2);
+      assert.strictEqual(res.detectedColumnCount, 14);
+
+      const first = res.rows[0];
+      assert.strictEqual(first.code, "HS-2026-09");
+      assert.strictEqual(first.fullName, "Lâm Chấn Khang");
+      assert.strictEqual(first.status, "active");
+      assert.strictEqual(first.tuitionStatus, "overdue");
+      assert.strictEqual(first.tuitionDueDate, "2026-12-20");
+      assert.strictEqual(first.tuitionAmount, "5.200.000 ₫");
+      assert.strictEqual(first.tuitionPeriod, "Học kỳ II");
+      assert.strictEqual(first.parentName, "Anh Quốc");
+      assert.strictEqual(first.parentPhone, "0945332900");
+      assert.strictEqual(first.targetGoal, "IELTS 6.0");
+      assert.strictEqual(first.joinedAt, "2026-11-20");
+      assert.strictEqual(first.isValid, true);
+
+      const second = res.rows[1];
+      assert.strictEqual(second.code, "HS-2026-08");
+      assert.strictEqual(second.fullName, "Bùi Trường Linh");
+      assert.strictEqual(second.tuitionStatus, "due-soon");
+      assert.strictEqual(second.parentPhone, "0982774115");
+      assert.strictEqual(second.targetGoal, "IELTS 6.5 (Xét tuyển ĐH)");
+      assert.strictEqual(second.recentComment, "Chăm chỉ");
+      assert.strictEqual(second.isValid, true);
+    });
+
+    it("13.12. parseStudentImportCsv đọc chuẩn file mẫu 6 cột tối giản", () => {
+      const csv = [
+        "Mã học sinh,Họ và tên,Mã lớp hoặc Tên lớp,Mục tiêu đầu ra,Trạng thái học phí (paid/due-soon/overdue),Nhận xét giáo viên",
+        "HS-2026-90,Trần Văn Bình,cls-ii-01,IELTS 7.0 Overall,paid,Học viên mới",
+      ].join("\n");
+
+      const res = parseStudentImportCsv(csv, CLASSROOMS_DATA, [], "2026-11-22");
+      assert.strictEqual(res.rows.length, 1);
+      assert.strictEqual(res.rows[0].code, "HS-2026-90");
+      assert.strictEqual(res.rows[0].fullName, "Trần Văn Bình");
+      assert.strictEqual(res.rows[0].classId, "cls-ii-01");
+      assert.strictEqual(res.rows[0].targetGoal, "IELTS 7.0 Overall");
+      assert.strictEqual(res.rows[0].tuitionStatus, "paid");
+      assert.strictEqual(res.rows[0].recentComment, "Học viên mới");
+      assert.strictEqual(res.rows[0].tuitionDueDate !== "paid", true);
     });
   });
 });

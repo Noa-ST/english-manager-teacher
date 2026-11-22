@@ -153,6 +153,8 @@ export type BatchGradesInput = z.infer<typeof batchGradesSchema>;
 
 export const createAssessmentSchema = z.object({
   title: z.string().trim().min(3).max(160),
+  classroomId: z.string().trim().max(64).nullable().optional(),
+  examDate: z.string().trim().max(32).nullable().optional(),
 });
 
 export const renameAssessmentSchema = z.object({
@@ -1474,13 +1476,32 @@ export async function listAssessments(): Promise<string[]> {
 }
 
 export async function createAssessment(input: unknown): Promise<string[]> {
-  const { title } = validate(createAssessmentSchema, input);
+  const { title, classroomId, examDate } = validate(createAssessmentSchema, input);
+  const resolvedClassroomId =
+    classroomId && classroomId !== "all" ? classroomId : null;
+  const resolvedExamDate = examDate?.trim() || null;
+
+  if (resolvedClassroomId) {
+    const exists = await prisma.classroom.findUnique({
+      where: { id: resolvedClassroomId },
+      select: { id: true },
+    });
+    if (!exists) {
+      throw new NotFoundError("Classroom", resolvedClassroomId);
+    }
+  }
+
   await prisma.assessmentCatalog.upsert({
     where: { title },
-    update: {},
+    update: {
+      ...(resolvedClassroomId !== undefined ? { classroomId: resolvedClassroomId } : {}),
+      ...(resolvedExamDate ? { examDate: resolvedExamDate } : {}),
+    },
     create: {
       title,
       category: classifyAssessmentCategory(title),
+      classroomId: resolvedClassroomId,
+      examDate: resolvedExamDate,
     },
   });
   return listAssessments();
@@ -1668,7 +1689,9 @@ export async function getGradesWorkspaceOverview(): Promise<{
   const [catalogRows, studentRows] = await Promise.all([
     prisma.assessmentCatalog.findMany({
       orderBy: [{ createdAt: "desc" }, { id: "asc" }],
-      select: { title: true },
+      include: {
+        classroom: { select: { id: true, code: true, name: true } },
+      },
     }),
     prisma.student.findMany({
       where: { deletedAt: null },
@@ -1681,6 +1704,7 @@ export async function getGradesWorkspaceOverview(): Promise<{
 
   const activeStudents = studentRows.filter((s) => s.status !== "archived");
 
+  const catalogMap = new Map(catalogRows.map((c) => [c.title, c]));
   const assessmentSet = new Set<string>(catalogRows.map((c) => c.title));
   for (const stu of activeStudents) {
     for (const g of stu.grades) {
@@ -1690,6 +1714,7 @@ export async function getGradesWorkspaceOverview(): Promise<{
 
   const assessmentStats: AssessmentSummaryItem[] = Array.from(assessmentSet).map(
     (title) => {
+      const catalog = catalogMap.get(title);
       let gradedCount = 0;
       let publishedCount = 0;
       let draftCount = 0;
@@ -1713,6 +1738,10 @@ export async function getGradesWorkspaceOverview(): Promise<{
 
       return {
         title,
+        classroomId: catalog?.classroomId ?? null,
+        classCode: catalog?.classroom?.code ?? null,
+        className: catalog?.classroom?.name ?? null,
+        examDate: catalog?.examDate ?? null,
         gradedCount,
         publishedCount,
         draftCount,

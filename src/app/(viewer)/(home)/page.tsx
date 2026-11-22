@@ -15,6 +15,10 @@ import type {
   PublicWeeklyClassSession,
 } from "@/services/viewer-home-helpers";
 import type { PublicOverviewPayload } from "@/services/viewer-overview.service";
+import {
+  persistTeacherBrandLocally,
+  readStoredTeacherBrand,
+} from "@/services/settings-helpers";
 import { apiRequest } from "@/lib/api-client";
 import { HomeAnnouncementsScheduleSection } from "@/components/viewer/home/home-announcements-schedule-section";
 import { HomeHallOfFameSection } from "@/components/viewer/home/home-hall-of-fame-section";
@@ -54,7 +58,7 @@ const EMPTY_TEACHER_PROFILE: TeacherProfile = {
   totalStudents: 0,
   bandAchievementRate: "",
   email: "",
-  avatarUrl: "/images/teacher-avatar.jpg",
+  avatarUrl: "",
   officeHours: "",
   location: "",
   socials: [],
@@ -99,10 +103,18 @@ export default function ViewerHomePage() {
   React.useEffect(() => {
     let active = true;
 
+    const cached = readStoredTeacherBrand();
+    if (cached) {
+      Promise.resolve().then(() => {
+        if (active) setTeacher((prev) => ({ ...prev, ...cached }));
+      });
+    }
+
     apiRequest<PublicOverviewPayload>("/api/viewer/overview")
       .then((data) => {
         if (!active || !data) return;
         setTeacher(data.teacher);
+        persistTeacherBrandLocally(data.teacher);
         setAnnouncements(data.announcements);
         setScheduleFallback(data.schedule);
         if (data.weekRange) {

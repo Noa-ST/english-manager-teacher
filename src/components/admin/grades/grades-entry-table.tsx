@@ -177,8 +177,8 @@ export function GradesEntryTable({
       <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-2xs">
         {/* Table Toolbar */}
         <div className="flex flex-col gap-3 border-b border-border px-5 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-border bg-muted/40 p-1">
               {(
                 [
                   ["all", `Tất cả (${rows.length})`],
@@ -194,10 +194,10 @@ export function GradesEntryTable({
                     setStatusFilter(key);
                     setPage(1);
                   }}
-                  className={`h-8 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors ${
+                  className={`h-7 rounded-lg px-3 text-xs font-medium whitespace-nowrap transition-colors ${
                     statusFilter === key
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted/60 text-muted-foreground hover:text-foreground"
+                      ? "bg-primary text-primary-foreground shadow-2xs"
+                      : "text-muted-foreground hover:bg-card/70 hover:text-foreground"
                   }`}
                 >
                   {label}
@@ -205,10 +205,10 @@ export function GradesEntryTable({
               ))}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="relative w-full sm:w-56">
+            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
+              <div className="relative flex-1 sm:w-56 sm:flex-none">
                 <Search
-                  className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+                  className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-muted-foreground"
                   aria-hidden="true"
                 />
                 <Input
@@ -219,7 +219,7 @@ export function GradesEntryTable({
                     setPage(1);
                   }}
                   placeholder="Tìm tên, mã HS..."
-                  className="h-8 pl-8 text-xs"
+                  className="h-9 pl-8 text-xs"
                 />
               </div>
 
@@ -227,12 +227,12 @@ export function GradesEntryTable({
                 value={changeReason}
                 onChange={(e) => onChangeReason(e.target.value)}
                 placeholder="Lý do điều chỉnh điểm (nếu sửa)..."
-                className="h-8 w-full text-xs sm:w-60"
+                className="h-9 flex-1 text-xs sm:w-64 sm:flex-none"
               />
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3 text-xs">
             <span className="text-muted-foreground">
               Học viên chưa thi để ô trống — chỉ lưu & tính trung bình trên{" "}
               <strong className="text-foreground">{readyToSaveCount}</strong> học viên đã nhập đủ 4 kỹ năng.
@@ -245,7 +245,7 @@ export function GradesEntryTable({
                 variant="outline"
                 disabled={readyToSaveCount === 0}
                 onClick={() => onOpenReport()}
-                className="h-8 whitespace-nowrap text-xs"
+                className="h-9 px-3.5 whitespace-nowrap text-xs"
               >
                 <MessageSquareShare className="size-3.5 text-primary" aria-hidden="true" />
                 Phiếu báo điểm cả lớp
@@ -256,7 +256,7 @@ export function GradesEntryTable({
                 variant="outline"
                 disabled={saving || readyToSaveCount === 0}
                 onClick={() => onSaveBatch("draft")}
-                className="h-8 whitespace-nowrap text-xs"
+                className="h-9 px-3.5 whitespace-nowrap text-xs"
               >
                 <Save className="size-3.5" aria-hidden="true" />
                 Lưu bản nháp
@@ -266,7 +266,7 @@ export function GradesEntryTable({
                 size="sm"
                 disabled={saving || readyToSaveCount === 0}
                 onClick={() => onSaveBatch("published")}
-                className="h-8 whitespace-nowrap text-xs"
+                className="h-9 px-4 whitespace-nowrap text-xs"
               >
                 <CheckCircle2 className="size-3.5" aria-hidden="true" />
                 {saving ? "Đang lưu..." : "Lưu & Công bố Cổng HS"}
@@ -301,7 +301,7 @@ export function GradesEntryTable({
                   <th className="min-w-[290px] px-3 py-3">
                     Nhận xét chuyên môn & Nội bộ GV
                   </th>
-                  <th className="px-4 py-3 text-right">Thao tác</th>
+                  <th className="w-[164px] px-4 py-3 text-right">Thao tác</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/70">
@@ -320,7 +320,7 @@ export function GradesEntryTable({
                       key={row.studentId}
                       className="transition-colors hover:bg-muted/20"
                     >
-                      <td className="px-4 py-3 align-top">
+                      <td className="px-4 py-3.5 align-middle">
                         <div className="flex flex-wrap items-center gap-1.5">
                           <span className="font-heading text-sm font-bold text-foreground">
                             {row.fullName}
@@ -399,7 +399,7 @@ export function GradesEntryTable({
                         )}
                       </td>
 
-                      <td className="px-3 py-3 align-top">
+                      <td className="px-3 py-3.5 align-middle">
                         <div className="space-y-1.5">
                           <div className="flex items-center gap-1.5">
                             <Input
@@ -456,13 +456,13 @@ export function GradesEntryTable({
                               }
                               placeholder="Ghi chú nội bộ GV (ẩn hoàn toàn với HS & PH)..."
                               aria-label={`Ghi chú nội bộ cho ${row.fullName}`}
-                              className="h-7 border-amber-200/80 bg-amber-50/40 pl-7 text-[11px] text-amber-950 placeholder:text-amber-700/60"
+                              className="h-8 border-amber-200/80 bg-amber-50/40 pl-7 text-[11px] text-amber-950 placeholder:text-amber-700/60"
                             />
                           </div>
                         </div>
                       </td>
 
-                      <td className="px-4 py-3 align-middle text-right whitespace-nowrap">
+                      <td className="px-4 py-3.5 align-middle text-right whitespace-nowrap">
                         <div className="flex flex-nowrap items-center justify-end gap-1.5">
                           <Button
                             type="button"
@@ -470,7 +470,7 @@ export function GradesEntryTable({
                             variant="outline"
                             disabled={!parsed.isGraded}
                             onClick={() => onOpenReport([row.studentId])}
-                            className="h-8 px-2.5 text-xs whitespace-nowrap"
+                            className="h-8 px-3 text-xs whitespace-nowrap"
                           >
                             <MessageSquareShare className="size-3.5" aria-hidden="true" />
                             Báo điểm PH

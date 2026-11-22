@@ -26,6 +26,10 @@ import type {
 import { ConflictError, NotFoundError } from "./errors";
 import { normalizeHallOfFameSearch } from "./hall-of-fame-helpers";
 import {
+  cleanupReplacedCloudinaryImage,
+  cleanupReplacedSupabaseFile,
+} from "./storage.service";
+import {
   mapPrismaAnnouncement,
   mapPrismaAnnouncementAttachment,
   mapPrismaHallOfFame,
@@ -250,7 +254,7 @@ export async function updateAnnouncement(
   const validId = validate(idSchema, id);
   const data = validate(updateAnnouncementSchema, input);
 
-  const updated = await prisma.$transaction(async (tx) => {
+  const { updated, removedAttachments } = await prisma.$transaction(async (tx) => {
     const existing = await tx.announcement.findUnique({
       where: { id: validId },
       include: { attachments: true },
@@ -261,7 +265,24 @@ export async function updateAnnouncement(
     const paragraphs =
       data.content && data.content.length > 0 ? data.content : existing.content;
 
+    let removed: Array<{ url: string | null; objectKey: string | null; name: string }> =
+      [];
+
     if (data.attachments !== undefined) {
+      const nextUrlSet = new Set(
+        data.attachments.map((a) => a.url?.trim()).filter(Boolean),
+      );
+      const nextKeySet = new Set(
+        data.attachments.map((a) => a.objectKey?.trim()).filter(Boolean),
+      );
+      removed = existing.attachments
+        .filter((oldAtt) => {
+          const urlKept = oldAtt.url && nextUrlSet.has(oldAtt.url.trim());
+          const keyKept = oldAtt.objectKey && nextKeySet.has(oldAtt.objectKey.trim());
+          return !urlKept && !keyKept;
+        })
+        .map((a) => ({ url: a.url, objectKey: a.objectKey, name: a.name }));
+
       await tx.announcementAttachment.deleteMany({
         where: { announcementId: validId },
       });
@@ -281,7 +302,7 @@ export async function updateAnnouncement(
       }
     }
 
-    return tx.announcement.update({
+    const row = await tx.announcement.update({
       where: { id: validId },
       data: {
         ...(data.title !== undefined ? { title: data.title } : {}),
@@ -299,7 +320,23 @@ export async function updateAnnouncement(
       },
       include: { attachments: true },
     });
+
+    return { updated: row, removedAttachments: removed };
   });
+
+  if (removedAttachments.length > 0) {
+    await Promise.all(
+      removedAttachments.map((att) =>
+        cleanupReplacedSupabaseFile({
+          oldUrl: att.url,
+          oldKey: att.objectKey,
+          newUrl: null,
+          newKey: null,
+          reason: `Gỡ tệp đính kèm "${att.name}" khỏi Thông báo "${updated.title}"`,
+        }),
+      ),
+    );
+  }
 
   return mapPrismaAnnouncement(updated);
 }
@@ -367,22 +404,43 @@ export async function removeAnnouncementAttachment(
   const validId = validate(idSchema, id);
   const validAttId = validate(idSchema, attachmentId);
 
-  const refreshed = await prisma.$transaction(async (tx) => {
+  const { refreshed, removedAttachment } = await prisma.$transaction(async (tx) => {
     const existing = await tx.announcement.findUnique({
       where: { id: validId },
-      select: { id: true },
+      select: { id: true, title: true },
     });
     if (!existing) throw new NotFoundError("Announcement", validId);
+
+    const targetAtt = await tx.announcementAttachment.findFirst({
+      where: { id: validAttId, announcementId: validId },
+      select: { url: true, objectKey: true, name: true },
+    });
 
     await tx.announcementAttachment.deleteMany({
       where: { id: validAttId, announcementId: validId },
     });
 
-    return tx.announcement.findUniqueOrThrow({
+    const row = await tx.announcement.findUniqueOrThrow({
       where: { id: validId },
       include: { attachments: true },
     });
+    return {
+      refreshed: row,
+      removedAttachment: targetAtt
+        ? { ...targetAtt, title: existing.title }
+        : null,
+    };
   });
+
+  if (removedAttachment) {
+    await cleanupReplacedSupabaseFile({
+      oldUrl: removedAttachment.url,
+      oldKey: removedAttachment.objectKey,
+      newUrl: null,
+      newKey: null,
+      reason: `Gỡ tệp đính kèm "${removedAttachment.name}" khỏi Thông báo "${removedAttachment.title}"`,
+    });
+  }
 
   return mapPrismaAnnouncement(refreshed);
 }
@@ -391,10 +449,24 @@ export async function deleteAnnouncement(id: unknown): Promise<void> {
   const validId = validate(idSchema, id);
   const existing = await prisma.announcement.findUnique({
     where: { id: validId },
-    select: { id: true },
+    include: { attachments: true },
   });
   if (!existing) throw new NotFoundError("Announcement", validId);
   await prisma.announcement.delete({ where: { id: validId } });
+
+  if (existing.attachments.length > 0) {
+    await Promise.all(
+      existing.attachments.map((att) =>
+        cleanupReplacedSupabaseFile({
+          oldUrl: att.url,
+          oldKey: att.objectKey,
+          newUrl: null,
+          newKey: null,
+          reason: `Xóa Thông báo "${existing.title}" (dọn tệp "${att.name}")`,
+        }),
+      ),
+    );
+  }
 }
 
 export async function recordAnnouncementAttachmentDownload(
@@ -1103,7 +1175,7 @@ export async function updateStudentProject(
 
   const existing = await prisma.studentProject.findUnique({
     where: { id: validId },
-    select: { id: true },
+    select: { id: true, posterUrl: true, posterPublicId: true, documentUrl: true },
   });
   if (!existing) throw new NotFoundError("StudentProject", validId);
 
@@ -1148,6 +1220,24 @@ export async function updateStudentProject(
     },
   });
 
+  if (data.posterUrl !== undefined || data.posterPublicId !== undefined) {
+    await cleanupReplacedCloudinaryImage({
+      oldUrl: existing.posterUrl,
+      oldPublicId: existing.posterPublicId,
+      newUrl: updated.posterUrl,
+      newPublicId: updated.posterPublicId,
+      reason: `Đổi ảnh bìa Dự án "${updated.title}"`,
+    });
+  }
+
+  if (data.documentUrl !== undefined) {
+    await cleanupReplacedSupabaseFile({
+      oldUrl: existing.documentUrl,
+      newUrl: updated.documentUrl,
+      reason: `Đổi tài liệu PDF Dự án "${updated.title}"`,
+    });
+  }
+
   return mapPrismaStudentProject(updated);
 }
 
@@ -1168,8 +1258,29 @@ export async function deleteStudentProject(id: unknown): Promise<void> {
   const validId = validate(idSchema, id);
   const existing = await prisma.studentProject.findUnique({
     where: { id: validId },
-    select: { id: true },
+    select: {
+      id: true,
+      title: true,
+      posterUrl: true,
+      posterPublicId: true,
+      documentUrl: true,
+    },
   });
   if (!existing) throw new NotFoundError("StudentProject", validId);
   await prisma.studentProject.delete({ where: { id: validId } });
+
+  await Promise.all([
+    cleanupReplacedCloudinaryImage({
+      oldUrl: existing.posterUrl,
+      oldPublicId: existing.posterPublicId,
+      newUrl: null,
+      newPublicId: null,
+      reason: `Xóa Dự án "${existing.title}"`,
+    }),
+    cleanupReplacedSupabaseFile({
+      oldUrl: existing.documentUrl,
+      newUrl: null,
+      reason: `Xóa Dự án "${existing.title}" (dọn tệp PDF)`,
+    }),
+  ]);
 }

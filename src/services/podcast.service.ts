@@ -17,6 +17,10 @@ import {
   toPrismaJson,
   toPrismaPodcastCategory,
 } from "./prisma-mappers";
+import {
+  cleanupReplacedCloudinaryImage,
+  cleanupReplacedSupabaseFile,
+} from "./storage.service";
 
 /**
  * Podcast service — Audio Newsletter (SRS 3.1) and its CMS (SRS 3.2).
@@ -262,7 +266,12 @@ export async function updatePodcast(
 
   const data = validate(updatePodcastSchema, input);
 
-  const updated = await prisma.$transaction(async (tx) => {
+  const {
+    updated,
+    previousThumbnailKey,
+    previousAudioUrl,
+    previousAudioKey,
+  } = await prisma.$transaction(async (tx) => {
     const existing = await tx.podcastEpisode.findUnique({
       where: { id: validId },
     });
@@ -287,7 +296,7 @@ export async function updatePodcast(
       });
     }
 
-    return tx.podcastEpisode.update({
+    const row = await tx.podcastEpisode.update({
       where: { id: validId },
       data: {
         ...(data.title !== undefined ? { title: data.title } : {}),
@@ -316,7 +325,31 @@ export async function updatePodcast(
           : {}),
       },
     });
+    return {
+      updated: row,
+      previousThumbnailKey: existing.thumbnailKey,
+      previousAudioUrl: existing.audioUrl,
+      previousAudioKey: existing.audioKey,
+    };
   });
+
+  if (data.thumbnailKey !== undefined) {
+    await cleanupReplacedCloudinaryImage({
+      oldUrl: previousThumbnailKey,
+      newUrl: updated.thumbnailKey,
+      reason: `Đổi ảnh bìa Podcast "${updated.title}"`,
+    });
+  }
+
+  if (data.audioUrl !== undefined || data.audioKey !== undefined) {
+    await cleanupReplacedSupabaseFile({
+      oldUrl: previousAudioUrl,
+      oldKey: previousAudioKey,
+      newUrl: updated.audioUrl,
+      newKey: updated.audioKey,
+      reason: `Đổi tệp âm thanh Podcast "${updated.title}"`,
+    });
+  }
 
   return mapPrismaPodcast(updated);
 }
@@ -325,8 +358,29 @@ export async function deletePodcast(id: unknown): Promise<void> {
   const validId = validate(idSchema, id);
   const existing = await prisma.podcastEpisode.findUnique({
     where: { id: validId },
-    select: { id: true },
+    select: {
+      id: true,
+      title: true,
+      thumbnailKey: true,
+      audioUrl: true,
+      audioKey: true,
+    },
   });
   if (!existing) throw new NotFoundError("Podcast", validId);
   await prisma.podcastEpisode.delete({ where: { id: validId } });
+
+  await Promise.all([
+    cleanupReplacedCloudinaryImage({
+      oldUrl: existing.thumbnailKey,
+      newUrl: null,
+      reason: `Xóa tập Podcast "${existing.title}"`,
+    }),
+    cleanupReplacedSupabaseFile({
+      oldUrl: existing.audioUrl,
+      oldKey: existing.audioKey,
+      newUrl: null,
+      newKey: null,
+      reason: `Xóa tập Podcast "${existing.title}"`,
+    }),
+  ]);
 }

@@ -1,10 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { CheckCircle2, Sparkles } from "lucide-react";
+import { Building2, CheckCircle2, Globe2, Sparkles } from "lucide-react";
 
 import { apiRequest } from "@/lib/api-client";
 import { useTodayIso } from "@/lib/use-today-iso";
+import type { ClassroomGroup } from "@/services/classroom-data";
 import { Button } from "@/components/ui/button";
 import { ModalDialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -13,8 +14,15 @@ import { useToast } from "@/components/ui/toast";
 
 interface GradesAssessmentModalProps {
   open: boolean;
+  classes: ClassroomGroup[];
+  defaultClassId?: string;
   onClose: () => void;
-  onCreated: (title: string, assessments: string[], examDate: string) => void;
+  onCreated: (
+    title: string,
+    assessments: string[],
+    examDate: string,
+    scopeClassId: string,
+  ) => void;
 }
 
 const TITLE_PRESETS = [
@@ -25,15 +33,25 @@ const TITLE_PRESETS = [
 ];
 
 function GradesAssessmentModalInner({
+  classes,
+  defaultClassId = "all",
   onClose,
   onCreated,
 }: Omit<GradesAssessmentModalProps, "open">) {
   const { toast } = useToast();
   const todayIso = useTodayIso();
   const [title, setTitle] = React.useState("");
+  const [scopeClassId, setScopeClassId] = React.useState<string>(defaultClassId);
   const [examDateOverride, setExamDate] = React.useState<string | null>(null);
   const examDate = examDateOverride ?? todayIso;
   const [submitting, setSubmitting] = React.useState(false);
+
+  const activeClasses = React.useMemo(
+    () => classes.filter((c) => c.status !== "archived"),
+    [classes],
+  );
+
+  const selectedClass = activeClasses.find((c) => c.id === scopeClassId);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -53,14 +71,18 @@ function GradesAssessmentModalInner({
         body: JSON.stringify({
           action: "create-assessment",
           title: cleaned,
+          classId: scopeClassId === "all" ? null : scopeClassId,
+          date: examDate,
         }),
       });
       toast({
         variant: "success",
         title: "Đã tạo kỳ kiểm tra mới",
-        description: `Bảng điểm "${cleaned}" sẵn sàng nhập điểm.`,
+        description: selectedClass
+          ? `Bảng điểm "${cleaned}" áp dụng riêng cho lớp ${selectedClass.code} — ${selectedClass.name}.`
+          : `Bảng điểm "${cleaned}" áp dụng chung cho tất cả các lớp.`,
       });
-      onCreated(cleaned, res.assessments, examDate);
+      onCreated(cleaned, res.assessments, examDate, scopeClassId);
     } catch (err) {
       toast({
         variant: "error",
@@ -74,6 +96,65 @@ function GradesAssessmentModalInner({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
+      {/* Scope selector */}
+      <div className="space-y-1.5">
+        <Label htmlFor="new-grade-assessment-scope">
+          Phạm vi áp dụng (Lớp học) *
+        </Label>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setScopeClassId("all")}
+            className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs transition-colors ${
+              scopeClassId === "all"
+                ? "border-primary bg-primary/8 font-semibold text-primary"
+                : "border-border bg-background text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            }`}
+          >
+            <Globe2 className="size-4 shrink-0" aria-hidden="true" />
+            <div>
+              <p className="leading-tight">Tất cả các lớp</p>
+              <p className="text-[10px] font-normal opacity-80">Kỳ thi chung trung tâm</p>
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (scopeClassId === "all") {
+                setScopeClassId(activeClasses[0]?.id ?? "all");
+              }
+            }}
+            disabled={activeClasses.length === 0}
+            className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs transition-colors ${
+              scopeClassId !== "all"
+                ? "border-primary bg-primary/8 font-semibold text-primary"
+                : "border-border bg-background text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            }`}
+          >
+            <Building2 className="size-4 shrink-0" aria-hidden="true" />
+            <div>
+              <p className="leading-tight">Riêng 1 lớp cụ thể</p>
+              <p className="text-[10px] font-normal opacity-80">Chỉ hiện ở lớp đã chọn</p>
+            </div>
+          </button>
+        </div>
+
+        {scopeClassId !== "all" && (
+          <select
+            id="new-grade-assessment-scope"
+            value={scopeClassId}
+            onChange={(e) => setScopeClassId(e.target.value)}
+            className="mt-2 h-9 w-full rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground"
+          >
+            {activeClasses.map((cls) => (
+              <option key={cls.id} value={cls.id}>
+                {cls.code} — {cls.name} ({cls.enrolled} HV)
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
       <div className="space-y-1.5">
         <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
           <Sparkles className="size-3.5 text-primary" aria-hidden="true" />
@@ -131,6 +212,8 @@ function GradesAssessmentModalInner({
 
 export function GradesAssessmentModal({
   open,
+  classes,
+  defaultClassId,
   onClose,
   onCreated,
 }: GradesAssessmentModalProps) {
@@ -139,12 +222,14 @@ export function GradesAssessmentModal({
       open={open}
       onClose={onClose}
       title="Tạo kỳ kiểm tra / đánh giá mới"
-      description="Các học viên chưa có điểm ở kỳ mới sẽ để trống (Chưa chấm), tuyệt đối không tự điền điểm giả."
+      description="Chọn phạm vi áp dụng (toàn trung tâm hoặc riêng 1 lớp). Các học viên chưa có điểm sẽ để trống (Chưa chấm)."
       size="md"
     >
       {open && (
         <GradesAssessmentModalInner
-          key="create-assessment"
+          key={`create-assessment-${defaultClassId ?? "all"}`}
+          classes={classes}
+          defaultClassId={defaultClassId}
           onClose={onClose}
           onCreated={onCreated}
         />
