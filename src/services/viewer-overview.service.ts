@@ -47,7 +47,19 @@ export interface PublicOverviewPayload {
   resources: PublicResourceFile[];
 }
 
-export async function getPublicOverviewData(
+const OVERVIEW_CACHE_TTL_MS = 15_000;
+let cachedOverviewEntry: {
+  expiresAt: number;
+  data: PublicOverviewPayload;
+} | null = null;
+let inFlightOverviewPromise: Promise<PublicOverviewPayload> | null = null;
+
+export function invalidatePublicOverviewCache(): void {
+  cachedOverviewEntry = null;
+  inFlightOverviewPromise = null;
+}
+
+async function computePublicOverviewData(
   now = new Date(),
 ): Promise<PublicOverviewPayload> {
   const weekRange = getCurrentWeekDateRange(now);
@@ -96,4 +108,36 @@ export async function getPublicOverviewData(
     projects: sanitizeProjectsForPublic(projects),
     resources: sanitizeDocumentFilesForPublic(resources),
   };
+}
+
+export async function getPublicOverviewData(
+  now?: Date,
+): Promise<PublicOverviewPayload> {
+  // When callers pass a custom Date (e.g. unit tests), bypass cache
+  if (now) {
+    return computePublicOverviewData(now);
+  }
+
+  const nowMs = Date.now();
+  if (cachedOverviewEntry && cachedOverviewEntry.expiresAt > nowMs) {
+    return cachedOverviewEntry.data;
+  }
+
+  if (inFlightOverviewPromise) {
+    return inFlightOverviewPromise;
+  }
+
+  inFlightOverviewPromise = computePublicOverviewData(new Date())
+    .then((result) => {
+      cachedOverviewEntry = {
+        data: result,
+        expiresAt: Date.now() + OVERVIEW_CACHE_TTL_MS,
+      };
+      return result;
+    })
+    .finally(() => {
+      inFlightOverviewPromise = null;
+    });
+
+  return inFlightOverviewPromise;
 }

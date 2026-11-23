@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { requireAdminApi, requireStudentApi } from "@/lib/auth";
+import { invalidateCachedUserProfile } from "@/lib/rbac";
 import { DomainError } from "@/services/errors";
+import { invalidatePublicOverviewCache } from "@/services/viewer-overview.service";
 import type { SessionUser } from "@/types";
 import type { ApiFailure, ApiSuccess, ErrorCode, PaginationMeta } from "@/types/api";
 
@@ -100,7 +102,12 @@ export function adminRoute<TContext extends object = RouteContext>(
   return async (request, context) => {
     try {
       const session = await requireAdminApi();
-      return await handler(request, { ...context, session });
+      const response = await handler(request, { ...context, session });
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        invalidatePublicOverviewCache();
+        invalidateCachedUserProfile();
+      }
+      return response;
     } catch (error) {
       return fail(error);
     }

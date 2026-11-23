@@ -1,7 +1,22 @@
+import { cache } from "react";
 import type { User } from "@supabase/supabase-js";
 
 import { createSupabaseAdminClient, createSupabaseServerClient } from "@/lib/supabase/server";
 import type { Role, UserProfile } from "@/types";
+
+const PROFILE_CACHE_TTL_MS = 20_000;
+const profileMemoryCache = new Map<
+  string,
+  { profile: UserProfile | null; expiresAt: number }
+>();
+
+export function invalidateCachedUserProfile(userId?: string): void {
+  if (userId) {
+    profileMemoryCache.delete(userId);
+  } else {
+    profileMemoryCache.clear();
+  }
+}
 
 /**
  * Centralized Role-Based Access Control (RBAC) layer.
@@ -27,7 +42,14 @@ export async function resolveProfileForAuthUser(user: User): Promise<UserProfile
   // Check Supabase Auth ban status
   const bannedUntil = (user as User & { banned_until?: string | null }).banned_until;
   if (bannedUntil && new Date(bannedUntil).getTime() > Date.now()) {
+    profileMemoryCache.delete(user.id);
     return null;
+  }
+
+  const now = Date.now();
+  const cached = profileMemoryCache.get(user.id);
+  if (cached && cached.expiresAt > now) {
+    return cached.profile;
   }
 
   let dbProfile: {
@@ -89,7 +111,7 @@ export async function resolveProfileForAuthUser(user: User): Promise<UserProfile
     user.email ??
     "Người dùng";
 
-  return {
+  const resolved: UserProfile = {
     id: user.id,
     email: dbProfile?.email ?? user.email ?? "",
     fullName,
@@ -99,9 +121,14 @@ export async function resolveProfileForAuthUser(user: User): Promise<UserProfile
     studentId,
     studentCode,
   };
+  profileMemoryCache.set(user.id, {
+    profile: resolved,
+    expiresAt: Date.now() + PROFILE_CACHE_TTL_MS,
+  });
+  return resolved;
 }
 
-export async function getCurrentUser(): Promise<User | null> {
+const getCurrentUserCached = cache(async (): Promise<User | null> => {
   try {
     const supabase = await createSupabaseServerClient();
     const {
@@ -113,12 +140,20 @@ export async function getCurrentUser(): Promise<User | null> {
   } catch {
     return null;
   }
+});
+
+export async function getCurrentUser(): Promise<User | null> {
+  return getCurrentUserCached();
 }
 
-export async function getUserProfile(): Promise<UserProfile | null> {
+const getUserProfileCached = cache(async (): Promise<UserProfile | null> => {
   const user = await getCurrentUser();
   if (!user) return null;
   return resolveProfileForAuthUser(user);
+});
+
+export async function getUserProfile(): Promise<UserProfile | null> {
+  return getUserProfileCached();
 }
 
 export async function getUserRole(): Promise<Role | null> {

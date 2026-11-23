@@ -20,7 +20,7 @@ function createPrismaClient(): PrismaClient {
     NODE_ENV === "test" && TEST_DATABASE_URL ? TEST_DATABASE_URL : DATABASE_URL;
   const adapter = new PrismaPg({
     connectionString,
-    max: process.env.VERCEL ? 2 : 10,
+    max: process.env.VERCEL ? 6 : 10,
   });
 
   return new PrismaClient({

@@ -12,7 +12,24 @@ export class ApiClientError extends Error {
   }
 }
 
-export async function apiRequestWithMeta<T>(
+const inFlightGetRequests = new Map<
+  string,
+  Promise<{ data: unknown; meta?: PaginationMeta }>
+>();
+
+const recentGetBurstCache = new Map<
+  string,
+  { expiresAt: number; value: { data: unknown; meta?: PaginationMeta } }
+>();
+
+const PUBLIC_BURST_TTL_MS = 2_000;
+
+export function clearApiClientCache(): void {
+  inFlightGetRequests.clear();
+  recentGetBurstCache.clear();
+}
+
+async function executeApiFetch<T>(
   url: string,
   init?: RequestInit,
 ): Promise<{ data: T; meta?: PaginationMeta }> {
@@ -34,6 +51,53 @@ export async function apiRequestWithMeta<T>(
   }
 
   return { data: payload.data, meta: payload.meta };
+}
+
+export async function apiRequestWithMeta<T>(
+  url: string,
+  init?: RequestInit,
+): Promise<{ data: T; meta?: PaginationMeta }> {
+  const method = (init?.method ?? "GET").toUpperCase();
+
+  // Any mutation invalidates recent burst cache so subsequent GETs see fresh state immediately
+  if (method !== "GET") {
+    recentGetBurstCache.clear();
+    return executeApiFetch<T>(url, init);
+  }
+
+  const isBurstCacheable =
+    url.startsWith("/api/viewer/") || url.startsWith("/api/public/");
+  if (isBurstCacheable) {
+    const cached = recentGetBurstCache.get(url);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value as { data: T; meta?: PaginationMeta };
+    }
+  }
+
+  const existingInFlight = inFlightGetRequests.get(url);
+  if (existingInFlight) {
+    return existingInFlight as Promise<{ data: T; meta?: PaginationMeta }>;
+  }
+
+  const requestPromise = executeApiFetch<T>(url, init)
+    .then((result) => {
+      if (isBurstCacheable) {
+        recentGetBurstCache.set(url, {
+          expiresAt: Date.now() + PUBLIC_BURST_TTL_MS,
+          value: result as { data: unknown; meta?: PaginationMeta },
+        });
+      }
+      return result;
+    })
+    .finally(() => {
+      inFlightGetRequests.delete(url);
+    });
+
+  inFlightGetRequests.set(
+    url,
+    requestPromise as Promise<{ data: unknown; meta?: PaginationMeta }>,
+  );
+  return requestPromise;
 }
 
 export async function apiRequest<T>(

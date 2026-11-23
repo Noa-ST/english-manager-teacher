@@ -62,23 +62,38 @@ export async function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const csp = buildPerRequestCsp(nonce);
-  const { response, user } = await updateSupabaseSession(request, {
-    "x-nonce": nonce,
-    "Content-Security-Policy-Report-Only": csp,
-  });
 
   const isAdminPage = isAdminPagePath(pathname);
   const isAdminApi = isAdminApiPath(pathname);
   const isStudentPage = isStudentPagePath(pathname);
   const isStudentApi = isStudentApiPath(pathname);
 
-  if (!isAdminPage && !isAdminApi && !isStudentPage && !isStudentApi) {
-    return applySecurityHeaders(response, nonce, csp);
+  const isPublicApi =
+    pathname.startsWith("/api/public/") ||
+    (pathname.startsWith("/api/viewer/") &&
+      pathname !== "/api/viewer/student-portal/verify");
+
+  // 1. Pure public APIs never use auth session cookies -> skip Supabase Auth roundtrip completely.
+  if (isPublicApi) {
+    const requestHeaders = new Headers(request.headers);
+    requestHeaders.set("x-nonce", nonce);
+    requestHeaders.set("Content-Security-Policy-Report-Only", csp);
+    const res = NextResponse.next({ request: { headers: requestHeaders } });
+    return applySecurityHeaders(res, nonce, csp);
   }
 
-  // Unauthenticated request to protected route
-  if (!user) {
-    if (isAdminApi || isStudentApi) {
+  // 2. Protected APIs (/api/admin/*, /api/student/*):
+  // Every route handler already enforces requireAdminApi() / requireStudentApi() before executing.
+  // Fast-reject in 0ms when no auth credentials exist; otherwise avoid duplicating getUser() + profiles REST calls twice per API request.
+  if (isAdminApi || isStudentApi) {
+    const hasSbCookie = request.cookies
+      .getAll()
+      .some((cookie) => cookie.name.startsWith("sb-"));
+    const hasBearer =
+      isStudentApi &&
+      (request.headers.get("authorization") ?? "").toLowerCase().startsWith("bearer ");
+
+    if (!hasSbCookie && !hasBearer) {
       const body: ApiFailure = {
         ok: false,
         error: { code: "UNAUTHORIZED", message: "Authentication required" },
@@ -86,6 +101,25 @@ export async function proxy(request: NextRequest) {
       return applySecurityHeaders(NextResponse.json(body, { status: 401 }), nonce, csp);
     }
 
+    const requestHeaders = new Headers(request.headers);
+    requestHeaders.set("x-nonce", nonce);
+    requestHeaders.set("Content-Security-Policy-Report-Only", csp);
+    const res = NextResponse.next({ request: { headers: requestHeaders } });
+    return applySecurityHeaders(res, nonce, csp);
+  }
+
+  // 3. Page requests: refresh Supabase session if sb-* cookie is present.
+  const { response, user } = await updateSupabaseSession(request, {
+    "x-nonce": nonce,
+    "Content-Security-Policy-Report-Only": csp,
+  });
+
+  if (!isAdminPage && !isStudentPage) {
+    return applySecurityHeaders(response, nonce, csp);
+  }
+
+  // Unauthenticated request to protected page
+  if (!user) {
     const loginUrl = new URL(LOGIN_PATH, request.url);
     loginUrl.searchParams.set("next", `${pathname}${search}`);
     return applySecurityHeaders(NextResponse.redirect(loginUrl), nonce, csp);
@@ -94,29 +128,15 @@ export async function proxy(request: NextRequest) {
   // Resolve verified role (DB profiles -> server-only app_metadata)
   const profile = await resolveProfileForAuthUser(user);
   if (!profile || !profile.isActive) {
-    if (isAdminApi || isStudentApi) {
-      const body: ApiFailure = {
-        ok: false,
-        error: { code: "FORBIDDEN", message: "Tài khoản chưa được kích hoạt hoặc không hợp lệ." },
-      };
-      return applySecurityHeaders(NextResponse.json(body, { status: 403 }), nonce, csp);
-    }
     return applySecurityHeaders(NextResponse.redirect(new URL(LOGIN_PATH, request.url)), nonce, csp);
   }
 
-  // Admin route gate
-  if ((isAdminPage || isAdminApi) && profile.role !== "admin") {
-    if (isAdminApi) {
-      const body: ApiFailure = {
-        ok: false,
-        error: { code: "FORBIDDEN", message: "Chỉ giáo viên (ADMIN) mới có quyền truy cập." },
-      };
-      return applySecurityHeaders(NextResponse.json(body, { status: 403 }), nonce, csp);
-    }
+  // Admin page gate
+  if (isAdminPage && profile.role !== "admin") {
     return applySecurityHeaders(NextResponse.redirect(new URL("/student", request.url)), nonce, csp);
   }
 
-  // Student route gate (both student and admin can view /student, but only active verified roles)
+  // Student page gate
   return applySecurityHeaders(response, nonce, csp);
 }
 

@@ -1204,8 +1204,26 @@ export async function recordAttendance(input: unknown): Promise<{
     targetClassroom = classrooms.find((c) => c.id === existingCsById.classId);
   }
 
-  // Load all students needed to resolve studentId / code
+  // Load only students belonging to targetClassroom or referenced in dedupedEntries
+  const candidateIdsOrCodes = Array.from(
+    new Set(dedupedEntries.map((e) => e.studentId.trim()).filter(Boolean)),
+  );
   const allStudentsInDb = await prisma.student.findMany({
+    where: {
+      OR: [
+        ...(targetClassroom ? [{ classroomId: targetClassroom.id }] : []),
+        ...(candidateIdsOrCodes.length > 0
+          ? [
+              { id: { in: candidateIdsOrCodes } },
+              {
+                OR: candidateIdsOrCodes.map((code) => ({
+                  code: { equals: code, mode: "insensitive" as const },
+                })),
+              },
+            ]
+          : []),
+      ],
+    },
     include: { attendanceHistory: true },
   });
   const findStudentByIdOrCode = (idOrCode: string) => {
@@ -1285,7 +1303,6 @@ export async function recordAttendance(input: unknown): Promise<{
       );
     }
     if (
-      data.classId &&
       targetClassroom &&
       stu.classroomId !== targetClassroom.id
     ) {

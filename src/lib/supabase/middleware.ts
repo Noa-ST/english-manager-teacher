@@ -38,6 +38,13 @@ export async function updateSupabaseSession(
     return { response, user: null };
   }
 
+  const hasSupabaseAuthCookie = request.cookies
+    .getAll()
+    .some((cookie) => cookie.name.startsWith("sb-"));
+  if (!hasSupabaseAuthCookie) {
+    return { response, user: null };
+  }
+
   const supabase = createServerClient(env.SUPABASE_URL, env.SUPABASE_PUBLISHABLE_KEY, {
     cookies: {
       getAll() {
