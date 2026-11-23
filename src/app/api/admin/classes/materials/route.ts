@@ -5,6 +5,8 @@ import type { CurriculumAttachment } from "@/services/classroom-data";
 import { ValidationError } from "@/services/errors";
 import * as storageService from "@/services/storage.service";
 
+export const maxDuration = 30;
+
 export const GET = adminRoute(async () => {
   const materials = await classroomService.listAllCurriculumMaterials();
   return ok(materials);
@@ -68,7 +70,45 @@ export const POST = adminRoute(async (request, { session }) => {
     weekNumber?: number;
     attachment?: CurriculumAttachment;
     assignments?: Array<{ classId: string; weekNumber: number }>;
+    directUpload?: {
+      fileName: string;
+      mimeType: string;
+      sizeBytes: number;
+      storagePath: string;
+      bucketName?: string | null;
+      publicUrl?: string | null;
+      cloudinaryPublicId?: string | null;
+      provider?: "cloudinary" | "supabase" | "r2" | "s3" | "local";
+      visibility?: "public" | "private";
+    };
   };
+
+  if (body?.action === "register-direct") {
+    if (!body.classId || !body.directUpload) {
+      throw new ValidationError("Thiếu thông tin lớp học hoặc tệp đã tải lên.");
+    }
+    const cls = await classroomService.getClassroomById(body.classId);
+    const weekNumber = Number(body.weekNumber) || 1;
+    const { storedFile, attachment } =
+      await storageService.registerDirectCurriculumAttachment({
+        ...body.directUpload,
+        classId: cls.id,
+        classCode: cls.code,
+        weekNumber,
+        visibility: body.directUpload.visibility ?? "private",
+        actorId: session.id,
+        actorRole: session.role,
+      });
+    const updatedClass = await classroomService.addClassroomMaterial(
+      cls.id,
+      weekNumber,
+      attachment,
+    );
+    return ok(
+      { attachment, storedFile, classroom: updatedClass },
+      { status: 201 },
+    );
+  }
 
   if (body?.action === "assign") {
     if (!body.attachment) {

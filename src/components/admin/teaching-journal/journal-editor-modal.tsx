@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 
 import { apiRequest } from "@/lib/api-client";
+import { uploadCurriculumFileDirect } from "@/lib/direct-upload";
 import { removeVietnameseTones } from "@/lib/utils";
 import type {
   ClassSessionRecord,
@@ -285,31 +286,21 @@ function JournalEditorModalInner({
 
     setUploading(true);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("visibility", "public");
+      const directUpload = await uploadCurriculumFileDirect(file, "public");
+      const data = await apiRequest<{
+        session: ClassSessionRecord;
+        attachment: SessionAttachment;
+      }>(`/api/admin/teaching-journal/${encodeURIComponent(session.id)}/attachments`, {
+        method: "POST",
+        body: JSON.stringify({ directUpload }),
+      });
 
-      const response = await fetch(
-        `/api/admin/teaching-journal/${encodeURIComponent(session.id)}/attachments`,
-        {
-          method: "POST",
-          body: formData,
-        },
-      );
-      const payload = (await response.json()) as
-        | { ok: true; data: { session: ClassSessionRecord; attachment: SessionAttachment } }
-        | { ok: false; error: { message: string } };
-
-      if (!payload.ok) {
-        throw new Error(payload.error.message || "Tải tệp thất bại.");
-      }
-
-      setAttachments(payload.data.session.attachments);
-      onSaved(payload.data.session);
+      setAttachments(data.session.attachments);
+      onSaved(data.session);
       toast({
         variant: "success",
         title: "Đã tải tài liệu lên buổi học",
-        description: `${payload.data.attachment.name} (${payload.data.attachment.size})`,
+        description: `${data.attachment.name} (${data.attachment.size})`,
       });
     } catch (err) {
       toast({

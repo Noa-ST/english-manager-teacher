@@ -42,11 +42,14 @@ function pruneMemoryRateLimits(now: number): void {
 export function getClientIp(request: Request): string {
   const trustProxy =
     process.env.TRUST_PROXY === "true" || process.env.VERCEL === "1";
+  const trustCloudflare = process.env.TRUST_CLOUDFLARE === "true";
 
   if (trustProxy) {
     const headers = request.headers;
-    const cfIp = headers.get("cf-connecting-ip")?.trim();
-    if (cfIp && isIP(cfIp)) return cfIp;
+    if (trustCloudflare) {
+      const cfIp = headers.get("cf-connecting-ip")?.trim();
+      if (cfIp && isIP(cfIp)) return cfIp;
+    }
 
     const realIp = headers.get("x-real-ip")?.trim();
     if (realIp && isIP(realIp)) return realIp;

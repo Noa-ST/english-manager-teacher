@@ -1,9 +1,11 @@
 import { getServerEnv } from "@/lib/env";
-import { adminRoute, ok } from "@/lib/http";
+import { adminRoute, ok, readJson } from "@/lib/http";
 import type { SessionAttachment } from "@/services/classroom-data";
 import { ValidationError } from "@/services/errors";
 import * as storageService from "@/services/storage.service";
 import * as teachingJournalService from "@/services/teaching-journal.service";
+
+export const maxDuration = 30;
 
 const CURRICULUM_TO_SESSION_TYPE: Record<string, SessionAttachment["type"]> = {
   PDF: "PDF",
@@ -18,6 +20,60 @@ export const POST = adminRoute<{ params: Promise<{ id: string }> }>(
   async (request, context) => {
     const { id } = await context.params;
     const session = await teachingJournalService.getClassSessionById(id);
+    const contentType = request.headers.get("content-type") || "";
+
+    if (contentType.includes("application/json")) {
+      const body = (await readJson(request)) as {
+        directUpload?: {
+          fileName: string;
+          mimeType: string;
+          sizeBytes: number;
+          storagePath: string;
+          bucketName?: string | null;
+          publicUrl?: string | null;
+          cloudinaryPublicId?: string | null;
+          provider?: "cloudinary" | "supabase" | "r2" | "s3" | "local";
+          visibility?: "public" | "private";
+        };
+      };
+      if (!body?.directUpload) {
+        throw new ValidationError("Thiếu thông tin tệp đính kèm đã tải lên.");
+      }
+
+      const { storedFile, attachment } =
+        await storageService.registerDirectCurriculumAttachment({
+          ...body.directUpload,
+          classId: session.classId,
+          classCode: session.classCode,
+          weekNumber: session.weekNumber,
+          visibility: body.directUpload.visibility ?? "public",
+          actorId: context.session.id || "admin",
+          actorRole: context.session.role,
+        });
+
+      const sessionAttachment: SessionAttachment = {
+        id: attachment.id,
+        storedFileId: attachment.storedFileId ?? storedFile.id,
+        name: attachment.name,
+        type: CURRICULUM_TO_SESSION_TYPE[attachment.type] ?? "PDF",
+        size: attachment.size,
+        url: attachment.url,
+        uploadedAt: attachment.uploadedAt,
+      };
+
+      const updatedSession = await teachingJournalService.addSessionAttachment(
+        id,
+        sessionAttachment,
+      );
+
+      return ok(
+        {
+          session: updatedSession,
+          attachment: sessionAttachment,
+        },
+        { status: 201 },
+      );
+    }
 
     let formData: FormData;
     try {

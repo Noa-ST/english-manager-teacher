@@ -1366,6 +1366,194 @@ export async function uploadCurriculumAttachment(
   return { storedFile: record, attachment };
 }
 
+const registerDirectCurriculumAttachmentSchema = z.object({
+  fileName: z.string().trim().min(1).max(255),
+  mimeType: z.string().trim().max(150).default("application/octet-stream"),
+  sizeBytes: z.coerce.number().int().positive(),
+  storagePath: objectKeySchema,
+  bucketName: z.string().trim().max(120).nullable().optional(),
+  publicUrl: z.string().trim().max(1000).nullable().optional(),
+  cloudinaryPublicId: z.string().trim().max(255).nullable().optional(),
+  provider: z.enum(["cloudinary", "supabase", "r2", "s3", "local"]).default("supabase"),
+  classId: z.string().trim().min(1).max(120),
+  classCode: z.string().trim().max(60).optional(),
+  weekNumber: z.coerce.number().int().min(1).max(52).default(1),
+  visibility: z.enum(["public", "private"]).default("private"),
+  actorId: z.string().trim().min(1).max(120).default("admin"),
+  actorRole: z.enum(["admin", "student"]).default("admin"),
+});
+
+export type RegisterDirectCurriculumAttachmentInput = z.input<
+  typeof registerDirectCurriculumAttachmentSchema
+>;
+
+/**
+ * Registers metadata in PostgreSQL after a browser-direct signed upload
+ * (bypasses Vercel's 4.5 MB Serverless Function payload limit for large PDFs/audio/slides).
+ */
+export async function registerDirectCurriculumAttachment(
+  input: RegisterDirectCurriculumAttachmentInput,
+): Promise<{ storedFile: StoredFileRecord; attachment: CurriculumAttachment }> {
+  const data = validate(registerDirectCurriculumAttachmentSchema, input);
+  if (data.actorRole !== "admin") {
+    throw new ForbiddenError("Chỉ giáo viên/admin mới có quyền tải tài liệu lớp học.");
+  }
+
+  const fileType = detectCurriculumAttachmentType(data.fileName, data.mimeType);
+  const env = getServerEnv();
+  const maxBytes =
+    fileType === "IMAGE"
+      ? env.MAX_IMAGE_SIZE_MB * MB
+      : fileType === "AUDIO"
+        ? env.MAX_AUDIO_SIZE_MB * MB
+        : env.MAX_PDF_SIZE_MB * MB;
+  if (data.sizeBytes > maxBytes) {
+    throw new ValidationError(
+      `Tệp vượt quá giới hạn dung lượng cho phép (${Math.round(maxBytes / MB)} MB).`,
+    );
+  }
+
+  const bucket =
+    data.bucketName ??
+    (data.provider === "cloudinary"
+      ? null
+      : data.visibility === "public"
+        ? env.SUPABASE_PUBLIC_BUCKET
+        : env.SUPABASE_PRIVATE_BUCKET);
+  const folderPrefix =
+    data.visibility === "public" ? "resources/exercises" : "student-documents";
+  const d = new Date();
+  const dateDisplay = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+  const storedId = `sf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const storedName = data.storagePath.split("/").pop() ?? data.fileName;
+  const normalizedMime = data.mimeType || "application/octet-stream";
+  const mappedStoredType: StoredFileRecord["fileType"] =
+    fileType === "IMAGE"
+      ? "IMAGE"
+      : fileType === "AUDIO"
+        ? "AUDIO"
+        : fileType === "SLIDE"
+          ? "SLIDE"
+          : fileType === "WORKSHEET"
+            ? "WORKSHEET"
+            : "PDF";
+  const isPublic = data.visibility === "public" || data.provider === "cloudinary";
+  const resolvedPublicUrl = isPublic ? (data.publicUrl ?? null) : null;
+
+  const createdStored = await prisma.$transaction(async (tx) => {
+    const sfRow = await tx.storedFile.create({
+      data: {
+        id: storedId,
+        originalName: data.fileName,
+        storedName,
+        provider: data.provider,
+        fileType: mappedStoredType,
+        mimeType: normalizedMime,
+        fileSize: data.sizeBytes,
+        bucketName: bucket,
+        storagePath: data.storagePath,
+        cloudinaryPublicId: data.cloudinaryPublicId ?? null,
+        publicUrl: resolvedPublicUrl,
+        isPublic,
+        ownerId: data.actorId,
+        category: folderPrefix,
+        referencedBy: [`classroom:${data.classId}:week:${data.weekNumber}`],
+      },
+    });
+
+    let targetFolder = await tx.resourceFolder.findFirst({
+      orderBy: [{ id: "asc" }],
+    });
+    if (!targetFolder) {
+      targetFolder = await tx.resourceFolder.create({
+        data: {
+          id: "fld-writing",
+          name: "01. Academic Writing & Essays",
+          description: "Thư mục học liệu số mặc định",
+          parentId: null,
+          itemCount: 0,
+          updatedAt: dateDisplay,
+          visibility: "public",
+        },
+      });
+    }
+
+    await tx.resourceFile.create({
+      data: {
+        id: storedId,
+        folderId: targetFolder.id,
+        folderName: targetFolder.name,
+        title: data.fileName,
+        description: `Tài liệu Tuần ${data.weekNumber} · Lớp ${data.classCode || data.classId}`,
+        fileType: mappedStoredType,
+        provider: data.provider,
+        mimeType: normalizedMime,
+        bucketName: bucket,
+        storagePath: data.storagePath,
+        cloudinaryPublicId: data.cloudinaryPublicId ?? null,
+        publicUrl: resolvedPublicUrl,
+        objectKey: data.storagePath,
+        size: formatBytesLabel(data.sizeBytes),
+        sizeBytes: data.sizeBytes,
+        updatedAt: dateDisplay,
+        downloads: 0,
+        pagesOrDuration: "Tài liệu lớp",
+        level: data.classCode || "IELTS",
+        visibility: isPublic ? "public" : "private",
+        category: folderPrefix,
+        ownerId: data.actorId,
+        originalName: data.fileName,
+        storedName,
+        previewSummary: [
+          `Gắn trực tiếp vào Tuần ${data.weekNumber} (${data.classCode || data.classId})`,
+          !isPublic
+            ? "Bảo mật qua Private Bucket & Signed URL cho học viên trong lớp."
+            : "Tệp công khai.",
+        ],
+      },
+    });
+
+    await tx.resourceFolder.update({
+      where: { id: targetFolder.id },
+      data: { itemCount: { increment: 1 } },
+    });
+
+    return sfRow;
+  });
+
+  const record = mapPrismaStoredFile(createdStored);
+
+  await recordAuditLog({
+    action: fileType === "IMAGE" ? "UPLOAD_IMAGE" : fileType === "AUDIO" ? "UPLOAD_PODCAST" : "UPLOAD_PDF",
+    provider: data.provider,
+    actorId: data.actorId,
+    targetId: record.id,
+    targetPath: bucket ? `${bucket}/${data.storagePath}` : data.storagePath,
+    status: "SUCCESS",
+    detail: `Đã tải trực tiếp tài liệu tuần ${data.weekNumber} (${fileType}): "${data.fileName}" (${formatBytesLabel(data.sizeBytes)})`,
+  });
+
+  const attachment: CurriculumAttachment = {
+    id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    name: data.fileName,
+    url:
+      isPublic && record.publicUrl
+        ? record.publicUrl
+        : `/api/admin/storage/download-url?fileId=${record.id}`,
+    size: formatBytesLabel(data.sizeBytes),
+    sizeBytes: data.sizeBytes,
+    type: fileType,
+    uploadedAt: dateDisplay,
+    storedFileId: record.id,
+    visibility: isPublic ? "public" : "private",
+    classId: data.classId,
+    classCode: data.classCode,
+    weekNumber: data.weekNumber,
+  };
+
+  return { storedFile: record, attachment };
+}
+
 // -----------------------------------------------------------------------------
 //  URL RETRIEVAL, SIGNED URLS & ACCESS CONTROL (PHẦN 3.4, 4.4, 4.5, 6, 8)
 // -----------------------------------------------------------------------------
@@ -1482,12 +1670,13 @@ export async function getSignedFileUrl(
           deletedAt: null,
           OR: [
             { id: input.actorId },
+            { profileId: input.actorId },
             { code: { equals: input.actorId, mode: "insensitive" } },
           ],
         },
         select: { classroomId: true },
       });
-      if (student && !allowedClasses.includes(student.classroomId)) {
+      if (!student || !allowedClasses.includes(student.classroomId)) {
         throw new ForbiddenError(
           "Tài liệu này thuộc về lớp học khác, bạn không có quyền truy cập.",
         );
@@ -2018,8 +2207,33 @@ export async function createUploadUrl(input: unknown): Promise<UploadTicket> {
     return { ...ticket, key: ticket.storagePath };
   }
 
+  const OFFICE_DOC_EXTENSIONS = new Set(["docx", "doc", "pptx", "ppt", "xlsx", "xls"]);
+  if (data.folder === "documents" && OFFICE_DOC_EXTENSIONS.has(extension)) {
+    if (data.size > env.MAX_PDF_SIZE_MB * MB) {
+      throw new ValidationError(
+        `Tài liệu vượt quá giới hạn ${env.MAX_PDF_SIZE_MB} MB của Supabase Free`,
+      );
+    }
+    await checkStorageQuota({ provider: "supabase", incomingSizeBytes: data.size });
+    const bucket =
+      data.visibility === "public"
+        ? env.SUPABASE_PUBLIC_BUCKET
+        : env.SUPABASE_PRIVATE_BUCKET;
+    const prefix =
+      data.visibility === "public" ? "resources/exercises" : "student-documents";
+    const storagePath = buildObjectKey(prefix, data.fileName);
+    const ticket = await getStorageProvider("supabase").createSignedUploadTicket({
+      bucket,
+      storagePath,
+      contentType: data.contentType || "application/octet-stream",
+      sizeBytes: data.size,
+      visibility: data.visibility,
+    });
+    return { ...ticket, key: ticket.storagePath };
+  }
+
   throw new ValidationError(
-    `Định dạng tệp "${data.contentType}" không được hỗ trợ. Chỉ hỗ trợ Ảnh (JPEG/PNG/WebP -> Cloudinary), Podcast (MP3/M4A -> Supabase) và Tài liệu (PDF -> Supabase).`,
+    `Định dạng tệp "${data.contentType}" không được hỗ trợ. Chỉ hỗ trợ Ảnh (JPEG/PNG/WebP -> Cloudinary), Podcast (MP3/M4A -> Supabase) và Tài liệu (PDF/DOCX/PPTX/XLSX -> Supabase).`,
   );
 }
 

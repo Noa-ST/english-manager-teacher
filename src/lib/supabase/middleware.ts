@@ -50,8 +50,14 @@ export async function updateSupabaseSession(
         response = NextResponse.next({
           request: { headers: buildRequestHeaders() },
         });
+        const isProd = env.NODE_ENV === "production";
         for (const { name, value, options } of cookiesToSet) {
-          response.cookies.set(name, value, options);
+          response.cookies.set(name, value, {
+            ...options,
+            httpOnly: true,
+            secure: isProd,
+            sameSite: "lax",
+          });
         }
       },
     },

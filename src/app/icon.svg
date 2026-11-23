@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="4" x2="56" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#243573" />
+      <stop offset="100%" stop-color="#111A3D" />
+    </linearGradient>
+    <linearGradient id="gold" x1="16" y1="13" x2="48" y2="33" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F8DA78" />
+      <stop offset="100%" stop-color="#D9A12B" />
+    </linearGradient>
+  </defs>
+
+  <!-- Academic Navy Squircle Badge -->
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#bg)" />
+  <rect
+    x="3.75"
+    y="3.75"
+    width="56.5"
+    height="56.5"
+    rx="13.25"
+    stroke="url(#gold)"
+    stroke-opacity="0.38"
+    stroke-width="1.5"
+  />
+
+  <!-- Gold Graduation Cap (Mortarboard) -->
+  <path d="M32 12.5L50 20L32 27.5L14 20L32 12.5Z" fill="url(#gold)" />
+  <path
+    d="M21.5 24.4V29.2C21.5 31.6 26.2 33.4 32 33.4C37.8 33.4 42.5 31.6 42.5 29.2V24.4L32 28.8L21.5 24.4Z"
+    fill="#D49A24"
+  />
+  <path d="M47.5 21.2V28.6" stroke="#F8DA78" stroke-width="2.2" stroke-linecap="round" />
+  <circle cx="47.5" cy="30.2" r="1.9" fill="#F8DA78" />
+
+  <!-- Crisp White Open Book -->
+  <path
+    d="M13 36.8C19.5 34.8 26.5 35.8 31 39.2V51.4C26.5 48.4 19.5 47.4 13 49.2V36.8Z"
+    fill="#FFFFFF"
+  />
+  <path
+    d="M51 36.8C44.5 34.8 37.5 35.8 33 39.2V51.4C37.5 48.4 44.5 47.4 51 49.2V36.8Z"
+    fill="#E8EEFF"
+  />
+  <path d="M32 39.4V51.4" stroke="#B7C5F0" stroke-width="1.2" stroke-linecap="round" />
+</svg>

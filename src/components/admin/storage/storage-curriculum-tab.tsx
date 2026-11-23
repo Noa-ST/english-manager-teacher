@@ -21,6 +21,8 @@ import {
   Share2,
   Trash2,
 } from "lucide-react";
+import { apiRequest } from "@/lib/api-client";
+import { uploadCurriculumFileDirect } from "@/lib/direct-upload";
 import type {
   ClassroomGroup,
   MasterCurriculumMaterial,
@@ -247,19 +249,19 @@ export function StorageCurriculumTab({
 
     setIsUploadingCurriculum(true);
     try {
-      const formData = new FormData();
-      formData.append("file", curriculumUploadFile);
-      formData.append("classId", targetClassId);
-      formData.append("weekNumber", String(curriculumUploadWeek));
-
-      const res = await fetch("/api/admin/classes/materials", {
+      const directUpload = await uploadCurriculumFileDirect(
+        curriculumUploadFile,
+        "private",
+      );
+      await apiRequest("/api/admin/classes/materials", {
         method: "POST",
-        body: formData,
+        body: JSON.stringify({
+          action: "register-direct",
+          classId: targetClassId,
+          weekNumber: curriculumUploadWeek,
+          directUpload,
+        }),
       });
-      const json = await res.json();
-      if (!res.ok || !json.ok) {
-        throw new Error(json?.error?.message || "Lỗi tải tệp lên lớp học");
-      }
 
       toast({
         title: "Tải tài liệu thành công!",

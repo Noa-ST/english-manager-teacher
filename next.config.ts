@@ -6,21 +6,45 @@ import type { NextConfig } from "next";
  * S3-compatible public bucket (R2 custom domain / S3 / CDN).
  */
 function storageRemotePatterns(): NonNullable<NextConfig["images"]>["remotePatterns"] {
+  const patterns: NonNullable<NextConfig["images"]>["remotePatterns"] = [
+    {
+      protocol: "https",
+      hostname: "res.cloudinary.com",
+      pathname: "/**",
+    },
+  ];
+
+  const supabaseRaw = process.env.SUPABASE_URL;
+  if (supabaseRaw?.trim()) {
+    try {
+      const url = new URL(supabaseRaw.trim());
+      patterns.push({
+        protocol: url.protocol.replace(":", "") as "http" | "https",
+        hostname: url.hostname,
+        port: url.port,
+        pathname: "/storage/v1/object/**",
+      });
+    } catch {
+      // ignore invalid SUPABASE_URL during offline build
+    }
+  }
+
   const raw = process.env.STORAGE_PUBLIC_URL;
-  if (!raw) return [];
-  try {
-    const url = new URL(raw);
-    return [
-      {
+  if (raw?.trim()) {
+    try {
+      const url = new URL(raw.trim());
+      patterns.push({
         protocol: url.protocol.replace(":", "") as "http" | "https",
         hostname: url.hostname,
         port: url.port,
         pathname: `${url.pathname.replace(/\/$/, "")}/**`,
-      },
-    ];
-  } catch {
-    throw new Error(`STORAGE_PUBLIC_URL is not a valid URL: "${raw}"`);
+      });
+    } catch {
+      throw new Error(`STORAGE_PUBLIC_URL is not a valid URL: "${raw}"`);
+    }
   }
+
+  return patterns;
 }
 
 function originFromEnvUrl(raw?: string): string | null {

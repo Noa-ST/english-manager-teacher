@@ -28,15 +28,19 @@ export async function createSupabaseServerClient(options?: {
       },
       setAll(cookiesToSet) {
         try {
+          const isProd = env.NODE_ENV === "production";
           for (const { name, value, options: cookieOptions } of cookiesToSet) {
-            if (options?.sessionOnly && cookieOptions && cookieOptions.maxAge !== 0) {
-              const sessionOptions = { ...cookieOptions };
-              delete sessionOptions.maxAge;
-              delete sessionOptions.expires;
-              cookieStore.set(name, value, sessionOptions);
-            } else {
-              cookieStore.set(name, value, cookieOptions);
+            const hardenedOptions = {
+              ...cookieOptions,
+              httpOnly: true,
+              secure: isProd,
+              sameSite: "lax" as const,
+            };
+            if (options?.sessionOnly && hardenedOptions.maxAge !== 0) {
+              delete hardenedOptions.maxAge;
+              delete hardenedOptions.expires;
             }
+            cookieStore.set(name, value, hardenedOptions);
           }
         } catch {
           // Called from a Server Component where setting cookies is a no-op;

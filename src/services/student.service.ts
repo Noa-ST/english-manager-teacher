@@ -20,6 +20,7 @@ import type {
 } from "./domain-types";
 import {
   ConflictError,
+  DomainError,
   NotFoundError,
   UnauthorizedError,
   ValidationError,
@@ -1247,9 +1248,12 @@ export async function batchCreateStudents(
       created.push(student);
     } catch (err) {
       const code = (item as { code?: string })?.code ?? "UNKNOWN";
+      if (!(err instanceof DomainError)) {
+        console.error(`[batchCreateStudents] Failed creating student ${code}:`, err);
+      }
       failed.push({
         code,
-        reason: err instanceof Error ? err.message : "Dữ liệu không hợp lệ",
+        reason: err instanceof DomainError ? err.message : "Không thể tạo hồ sơ học sinh",
       });
     }
   }
@@ -1491,6 +1495,22 @@ export async function createAssessment(input: unknown): Promise<string[]> {
     }
   }
 
+  const existingCatalog = await prisma.assessmentCatalog.findUnique({
+    where: { title },
+    select: { id: true, classroomId: true },
+  });
+
+  if (
+    existingCatalog &&
+    existingCatalog.classroomId &&
+    resolvedClassroomId &&
+    existingCatalog.classroomId !== resolvedClassroomId
+  ) {
+    throw new ConflictError(
+      `Kỳ kiểm tra "${title}" đã thuộc về lớp khác. Vui lòng đặt tên phân biệt (ví dụ kèm mã lớp).`,
+    );
+  }
+
   await prisma.assessmentCatalog.upsert({
     where: { title },
     update: {
@@ -1723,6 +1743,9 @@ export async function getGradesWorkspaceOverview(): Promise<{
       let latestDisplay = "";
 
       for (const stu of activeStudents) {
+        if (catalog?.classroomId && stu.classroomId !== catalog.classroomId) {
+          continue;
+        }
         const g = stu.grades.find((item) => item.assessmentTitle === title);
         if (!g) continue;
         gradedCount += 1;

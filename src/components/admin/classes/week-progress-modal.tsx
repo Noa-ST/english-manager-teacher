@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 
 import { apiRequest } from "@/lib/api-client";
+import { uploadCurriculumFileDirect } from "@/lib/direct-upload";
 import { removeVietnameseTones } from "@/lib/utils";
 import { readStoredTeacherBrand } from "@/services/settings-helpers";
 import {
@@ -132,21 +133,23 @@ function WeekProgressModalInner({
       const addedList: CurriculumAttachment[] = [];
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append("classId", classroom.id);
-        formData.append("weekNumber", String(week.weekNumber));
-        formData.append("visibility", visibilityMode);
-
-        const res = await fetch("/api/admin/classes/materials", {
-          method: "POST",
-          body: formData,
-        });
-        const json = await res.json();
-        if (!res.ok || !json.ok || !json.data?.attachment) {
-          throw new Error(json?.error?.message || `Không thể tải lên tệp "${file.name}".`);
+        const directUpload = await uploadCurriculumFileDirect(file, visibilityMode);
+        const data = await apiRequest<{ attachment: CurriculumAttachment }>(
+          "/api/admin/classes/materials",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              action: "register-direct",
+              classId: classroom.id,
+              weekNumber: week.weekNumber,
+              directUpload,
+            }),
+          },
+        );
+        if (!data?.attachment) {
+          throw new Error(`Không thể tải lên tệp "${file.name}".`);
         }
-        addedList.push(json.data.attachment);
+        addedList.push(data.attachment);
       }
       setAttachments((prev) => [...prev, ...addedList]);
       toast({

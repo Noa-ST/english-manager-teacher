@@ -235,8 +235,8 @@ export function StudentPortalView({
     () =>
       authenticatedStudent
         ? authenticatedStudent.grades.filter(
-            (g) => (g.status ?? "published") !== "draft",
-          ).length
+          (g) => (g.status ?? "published") !== "draft",
+        ).length
         : 0,
     [authenticatedStudent],
   );
@@ -248,44 +248,44 @@ export function StudentPortalView({
     Icon: React.ComponentType<{ className?: string }>;
     badge?: string;
   }> = [
-    {
-      key: "overview",
-      label: SECTION_META.overview.label,
-      href: buildSectionHref("overview"),
-      Icon: SECTION_META.overview.Icon,
-    },
-    {
-      key: "profile",
-      label: SECTION_META.profile.label,
-      href: buildSectionHref("profile"),
-      Icon: SECTION_META.profile.Icon,
-    },
-    {
-      key: "grades",
-      label: SECTION_META.grades.label,
-      href: buildSectionHref("grades"),
-      Icon: SECTION_META.grades.Icon,
-      badge: authenticatedStudent ? String(publishedGradeCount) : undefined,
-    },
-    {
-      key: "attendance",
-      label: SECTION_META.attendance.label,
-      href: buildSectionHref("attendance"),
-      Icon: SECTION_META.attendance.Icon,
-      badge: authenticatedStudent
-        ? `${authenticatedStudent.attendanceRate}%`
-        : undefined,
-    },
-    {
-      key: "schedule",
-      label: SECTION_META.schedule.label,
-      href: buildSectionHref("schedule"),
-      Icon: SECTION_META.schedule.Icon,
-      badge: roadmap
-        ? `T${roadmap.currentWeek}/${roadmap.totalWeeks}`
-        : undefined,
-    },
-  ];
+      {
+        key: "overview",
+        label: SECTION_META.overview.label,
+        href: buildSectionHref("overview"),
+        Icon: SECTION_META.overview.Icon,
+      },
+      {
+        key: "profile",
+        label: SECTION_META.profile.label,
+        href: buildSectionHref("profile"),
+        Icon: SECTION_META.profile.Icon,
+      },
+      {
+        key: "grades",
+        label: SECTION_META.grades.label,
+        href: buildSectionHref("grades"),
+        Icon: SECTION_META.grades.Icon,
+        badge: authenticatedStudent ? String(publishedGradeCount) : undefined,
+      },
+      {
+        key: "attendance",
+        label: SECTION_META.attendance.label,
+        href: buildSectionHref("attendance"),
+        Icon: SECTION_META.attendance.Icon,
+        badge: authenticatedStudent
+          ? `${authenticatedStudent.attendanceRate}%`
+          : undefined,
+      },
+      {
+        key: "schedule",
+        label: SECTION_META.schedule.label,
+        href: buildSectionHref("schedule"),
+        Icon: SECTION_META.schedule.Icon,
+        badge: roadmap
+          ? `T${roadmap.currentWeek}/${roadmap.totalWeeks}`
+          : undefined,
+      },
+    ];
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 px-4 py-8 sm:px-6 sm:py-10 lg:px-8">
@@ -295,14 +295,14 @@ export function StudentPortalView({
           items={
             initialSection === "overview"
               ? [
-                  { label: "Trang chủ", href: "/" },
-                  { label: "Cổng Học sinh" },
-                ]
+                { label: "Trang chủ", href: "/" },
+                { label: "Cổng Học sinh" },
+              ]
               : [
-                  { label: "Trang chủ", href: "/" },
-                  { label: "Cổng Học sinh", href: buildSectionHref("overview") },
-                  { label: currentMeta.label },
-                ]
+                { label: "Trang chủ", href: "/" },
+                { label: "Cổng Học sinh", href: buildSectionHref("overview") },
+                { label: currentMeta.label },
+              ]
           }
         />
 
@@ -406,21 +406,19 @@ export function StudentPortalView({
                 key={item.key}
                 href={item.href}
                 aria-current={isActive ? "page" : undefined}
-                className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all ${
-                  isActive
-                    ? "bg-primary text-primary-foreground shadow-xs"
-                    : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground"
-                }`}
+                className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all ${isActive
+                  ? "bg-primary text-primary-foreground shadow-xs"
+                  : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  }`}
               >
                 <Icon className="size-3.5" aria-hidden="true" />
                 <span>{item.label}</span>
                 {item.badge && (
                   <span
-                    className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] ${
-                      isActive
-                        ? "bg-primary-foreground/20 text-primary-foreground"
-                        : "bg-background text-foreground/80"
-                    }`}
+                    className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] ${isActive
+                      ? "bg-primary-foreground/20 text-primary-foreground"
+                      : "bg-background text-foreground/80"
+                      }`}
                   >
                     {item.badge}
                   </span>

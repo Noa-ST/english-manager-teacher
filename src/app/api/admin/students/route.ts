@@ -6,6 +6,8 @@ import * as studentService from "@/services/student.service";
  * Auth + error envelope: adminRoute(). Validation + logic: student.service.
  */
 
+export const maxDuration = 30;
+
 export const GET = adminRoute(async (request) => {
   const page = await studentService.listStudents(readQuery(request));
   return ok(page.items, {
